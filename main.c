@@ -25,6 +25,7 @@
 #include <stdbool.h>
 #include <time.h>
 #include "bplustree.h"
+#include "libhashfile.h"
 
 
 // ===================================================
@@ -32,10 +33,12 @@
 // ===================================================
 
 struct g_args_t {
+    uint32_t fingerprint_size;  // in bytes
     char *hash_filename;
     int hash_fd;
     int run_mode;
     char *bplustree_filename;
+    char *dataset_filename;
     uint64_t cur_nbd_offset;
     zlog_category_t* write_block_category;
     zlog_category_t* log_error;
@@ -76,7 +79,7 @@ enum mode{
 
 static void fingerprint_to_str(char *dest, char *src)
 {
-    for (int i=0; i<SHA_DIGEST_LENGTH; i++)
+    for (int i=0; i<g_args.fingerprint_size; i++)
         sprintf(&dest[i*2], "%02x", (unsigned int)src[i]);
 
 }
@@ -89,18 +92,19 @@ static void fingerprint_to_str(char *dest, char *src)
 static void usage()
 {
     fprintf(stderr, "Options:\n\n");
-    fprintf(stderr, BOLD"    -h, --help\n" NONE "\tdisplay the help infomation\n\n");
-    fprintf(stderr, BOLD"    -i, --init\n" NONE "\tspecify the nbd device and init\n\n");
-    fprintf(stderr, BOLD"    -a, --hash-file\n" NONE "\tspecify the hash file\n\n");
-    fprintf(stderr, BOLD"    -p, --physical-device\n" NONE "\tspecify the physical device or file\n\n");
-    fprintf(stderr, BOLD"    -s, --space\n" NONE "\tspace mapping and specify space db file\n\n");
-    fprintf(stderr, BOLD"    -b, --btree\n" NONE "\tb+tree mapping mode and specify b+tree db file\n\n");
+    fprintf(stderr, "    -h, --help\n"  "\tdisplay the help infomation\n\n");
+    fprintf(stderr, "    -d, --dataset\n" "\tdata set file\n");
+    fprintf(stderr, "    -i, --init\n"  "\tspecify the nbd device and init\n\n");
+    fprintf(stderr, "    -a, --hash-file\n"  "\tspecify the hash file\n\n");
+    fprintf(stderr, "    -p, --physical-device\n"  "\tspecify the physical device or file\n\n");
+    fprintf(stderr, "    -b, --btree\n"  "\tb+tree mapping mode and specify b+tree db file\n\n");
+    exit(0);
 }
 
 static int fingerprint_is_zero(char *fingerprint)
 {
     int i;
-    for (i = 0; i < FINGERPRINT_SIZE; i++) {
+    for (i = 0; i < g_args.fingerprint_size; i++) {
         if (fingerprint[i])
             return 0;
     }
@@ -114,7 +118,7 @@ static int fingerprint_is_zero(char *fingerprint)
 static int hash_index_get_bucket(char *hash, hash_bucket *bucket)
 {
     /* We don't need to look at the entire hash, just the last few bytes. */
-    int32_t *hash_tail = (int32_t *)(hash + FINGERPRINT_SIZE - sizeof(int32_t));
+    int32_t *hash_tail = (int32_t *)(hash + g_args.fingerprint_size - sizeof(int32_t));
     int bucket_index = *hash_tail % NBUCKETS;
     SEEK_TO_BUCKET(g_args.hash_fd, bucket_index);
     int err = read(g_args.hash_fd, bucket,
@@ -127,7 +131,7 @@ static int hash_index_get_bucket(char *hash, hash_bucket *bucket)
 static int hash_index_put_bucket(char *hash, hash_bucket *bucket)
 {
     /* We don't need to look at the entire hash, just the last few bytes. */
-    int32_t *hash_tail = (int32_t *)(hash + FINGERPRINT_SIZE - sizeof(int32_t));
+    int32_t *hash_tail = (int32_t *)(hash + g_args.fingerprint_size - sizeof(int32_t));
     int bucket_index = *hash_tail % NBUCKETS;
     SEEK_TO_BUCKET(g_args.hash_fd, bucket_index);
     int err = write(g_args.hash_fd, bucket,
@@ -145,7 +149,7 @@ static int hash_index_insert(char *hash, uint64_t hash_log_address)
     for (int i = 0; i < ENTRIES_PER_BUCKET; i++)
         if (bucket[i].hash_log_address == 0) {
             /* We have found an empty slot. */
-            memcpy(bucket[i].hash, hash, FINGERPRINT_SIZE);
+            memcpy(bucket[i].hash, hash, g_args.fingerprint_size);
             bucket[i].hash_log_address = hash_log_address;
             hash_index_put_bucket(hash, &bucket);
             return 0;
@@ -175,7 +179,7 @@ static uint64_t hash_index_lookup(char *hash)
     hash_index_get_bucket(hash, &bucket);
 
     for (int i = 0; i < ENTRIES_PER_BUCKET; i++)
-        if (!memcmp(bucket[i].hash, hash, FINGERPRINT_SIZE))
+        if (!memcmp(bucket[i].hash, hash, g_args.fingerprint_size))
             return bucket[i].hash_log_address;
     return -1;
 }
@@ -190,7 +194,7 @@ static int hash_index_remove(char *hash)
     hash_index_get_bucket(hash, &bucket);
 
     for (int i = 0; i < ENTRIES_PER_BUCKET; i++)
-        if (!memcmp(bucket[i].hash, hash, FINGERPRINT_SIZE)) {
+        if (!memcmp(bucket[i].hash, hash, g_args.fingerprint_size)) {
             memset(bucket + i, 0, sizeof(struct hash_index_entry));
             hash_index_put_bucket(hash, &bucket);
             return 0;
@@ -229,7 +233,7 @@ static uint64_t physical_block_new(uint64_t block_size)
 
 static int physical_block_free(uint64_t offest, uint64_t size)
 {
-    printf("Freed physical block:, offset: %lu, size: %lu\n", offest, size);
+    printf("Freed physical block, offset: %lu, size: %lu\n", offest, size);
 
     return 0;
 }
@@ -260,7 +264,7 @@ static struct hash_log_entry lookup_fingerprint(char *fingerprint)
 
     // Search in CACHE
     u_int32_t index = get_cache_index(fingerprint);
-    if (!memcmp(fingerprint, cache[index].fingerprint, FINGERPRINT_SIZE)) {
+    if (!memcmp(fingerprint, cache[index].fingerprint, g_args.fingerprint_size)) {
         // Awesome, this fingerprint is already cached, so we are good to go.
         return cache[index];
     }
@@ -285,13 +289,13 @@ static struct hash_log_entry lookup_fingerprint(char *fingerprint)
         assert(err == sizeof(struct hash_log_entry));
 
         u_int32_t j = get_cache_index(h.fingerprint);
-        memcpy(cache + j, &h, FINGERPRINT_SIZE);
+        memcpy(cache + j, &h, g_args.fingerprint_size);
     }
 
     /* Now we should have looked up the fingerprint we wanted, along with a
      * bunch of others. */
 
-    err = memcmp(fingerprint, cache[index].fingerprint, FINGERPRINT_SIZE);
+    err = memcmp(fingerprint, cache[index].fingerprint, g_args.fingerprint_size);
     if (err != 0) {
         hash_log_address = hash_index_lookup(fingerprint);
         SEEK_TO_HASH_LOG(g_args.hash_fd, hash_log_address);
@@ -345,11 +349,16 @@ static int write_to_disk(int fd, uint64_t size)
 
 static int write_one_chunk(uint64_t chunk_size, uint8_t *hash)
 {
+    char fingerprint[g_args.fingerprint_size];
+    fingerprint_to_str(fingerprint, hash);
+    printf("[Write] | chunk size: %lu, fingerprint: %s\n", chunk_size, fingerprint);
+
+
     ssize_t ret;
     struct block_map_entry bme;
     bme.nbd_offset = get_nbd_offset(chunk_size);
     bme.length = chunk_size;
-    memcpy(bme.fingerprit, hash, FINGERPRINT_SIZE);
+    memcpy(bme.fingerprit, hash, g_args.fingerprint_size);
 
     bplus_tree_put(g_args.tree, bme.nbd_offset, bme);
 
@@ -360,7 +369,7 @@ static int write_one_chunk(uint64_t chunk_size, uint8_t *hash)
     hash_log_address = hash_index_lookup(hash);
     if (hash_log_address == (uint64_t)-1) {
         // This chunk is new
-        memcpy(hle.fingerprint, hash, FINGERPRINT_SIZE);
+        memcpy(hle.fingerprint, hash, g_args.fingerprint_size);
         hle.data_log_offset = physical_block_new(chunk_size);
         hle.ref_count = 1;
         hle.block_size = chunk_size;
@@ -408,12 +417,12 @@ static int dedup_read(void *buf, uint32_t len, uint64_t offset)
     bmap_entry = bplus_tree_get_fuzzy(g_args.tree, offset);
 
     /* If we don't BEGIN on a block boundary */
-    if (offset != bmap_entry.start) {
+    if (offset != bmap_entry.nbd_offset) {
         if(bmap_entry.length == 0) {
             memset(bufi, 0, len);
             return 0;
         }
-        uint32_t read_size = bmap_entry.length - (offset - bmap_entry.start);
+        uint32_t read_size = bmap_entry.length - (offset - bmap_entry.nbd_offset);
         assert(read_size >= 0);
 
 
@@ -467,6 +476,101 @@ static void do_round_work()
     exit(0);
 }
 
+static void print_chunk_hash(uint64_t chunk_count, const uint8_t *hash,
+                             int hash_size_in_bytes)
+{
+    int j;
+
+    printf("Chunk %06"PRIu64 ": ", chunk_count);
+
+    printf("%.2hhx", hash[0]);
+    for (j = 1; j < hash_size_in_bytes; j++)
+        printf(":%.2hhx", hash[j]);
+    printf("\n");
+}
+
+static int read_datafile(char *datafile_name)
+{
+    char buf[MAXLINE];
+    struct hashfile_handle *handle;
+    const struct chunk_info *ci;
+    uint64_t chunk_count;
+    time_t scan_start_time;
+    int ret;
+    char fingerpritn[g_args.fingerprint_size];
+
+    handle = hashfile_open(datafile_name);
+    if (!handle) {
+        fprintf(stderr, "Error opening hash file: %d!", errno);
+        return -1;
+    }
+
+    /* Print some information about the hash file */
+    scan_start_time = hashfile_start_time(handle);
+    printf("Collected at [%s] on %s",
+           hashfile_sysid(handle),
+           ctime(&scan_start_time));
+
+    ret = hashfile_chunking_method_str(handle, buf, MAXLINE);
+    if (ret < 0) {
+        fprintf(stderr, "Unrecognized chunking method: %d!", errno);
+        return -1;
+    }
+
+    printf("Chunking method: %s", buf);
+
+    ret = hashfile_hashing_method_str(handle, buf, MAXLINE);
+    if (ret < 0) {
+        fprintf(stderr, "Unrecognized hashing method: %d!", errno);
+        return -1;
+    }
+
+    printf("Hashing method: %s\n", buf);
+
+    /* Go over the files in a hashfile */
+    printf("== List of files and hashes ==\n");
+    while (1) {
+        ret = hashfile_next_file(handle);
+        if (ret < 0) {
+            fprintf(stderr,
+                    "Cannot get next file from a hashfile: %d!\n",
+                    errno);
+            return -1;
+        }
+
+        /* exit the loop if it was the last file */
+        if (ret == 0)
+            break;
+
+
+        printf("File path: %s\n", hashfile_curfile_path(handle));
+        printf("File size: %"PRIu64 " B\n",
+               hashfile_curfile_size(handle));
+        printf("Chunks number: %" PRIu64 "\n",
+               hashfile_curfile_numchunks(handle));
+
+        /* Go over the chunks in the current file */
+        chunk_count = 0;
+        while (1) {
+            ci = hashfile_next_chunk(handle);
+            if (!ci) /* exit the loop if it was the last chunk */
+                break;
+
+            chunk_count++;
+
+            fingerprint_to_str(fingerpritn, ci->hash);
+            printf("%s\n", fingerpritn);
+            print_chunk_hash(chunk_count, ci->hash,
+                             hashfile_hash_size(handle) / 8);
+
+            write_one_chunk(ci->size, ci->hash);
+        }
+    }
+
+    hashfile_close(handle);
+
+    return 0;
+}
 
 /**
  * Init in B+TREE mode.
@@ -477,8 +581,6 @@ static int init()
     int err;
 
 
-    printf("init %llu buckets\n", NBUCKETS);
-
     /* We now initialize the hash log and data log. These start out empty, so we
      * put everything in the free list. It might be more efficient to stage this
      * in memory and then write it out in larger blocks. But the Linux buffer
@@ -488,10 +590,6 @@ static int init()
         err = write(g_args.hash_fd, &i, sizeof(uint64_t));
         assert(err == sizeof(uint64_t));
     }
-
-    /* We use a list to manage free data log */
-
-
 
     return 0;
 }
@@ -511,13 +609,14 @@ void static open_hash_file(char *filename)
 void parse_command_line(int argc, char *argv[])
 {
     /* command line args */
-    const char *opt_string = "i:n:h:b:a";
+    const char *opt_string = "i:n:h:b:a:d";
     const struct option long_opts[] = {
-            {"init", required_argument, NULL, 'i'},
-            {"nbd", required_argument, NULL, 'n'},
+            {"init", no_argument, NULL, 'i'},
+            {"nbd", no_argument, NULL, 'n'},
             {"hash-file", required_argument, NULL, 'a'},
             {"help", no_argument, NULL, 'h'},
             {"bplustree", required_argument, NULL, 'b'},
+            {"dataset", required_argument, NULL, 'd'},
             {NULL, 0, NULL, NULL},
     };
 
@@ -540,6 +639,9 @@ void parse_command_line(int argc, char *argv[])
             case 'b':   // b+tree mode
                 g_args.bplustree_filename = optarg;
                 break;
+            case 'd':
+                g_args.dataset_filename = optarg;
+                break;
             case 'h':   // help
             default:
                 usage();
@@ -548,6 +650,10 @@ void parse_command_line(int argc, char *argv[])
         opt = getopt_long(argc, argv, opt_string, long_opts, NULL);
     }
 }
+
+
+
+
 
 /**
  * Main entry
@@ -587,7 +693,6 @@ int main(int argc, char *argv[])
         err = read(g_args.hash_fd, &hash_log_free_list, sizeof(uint64_t));
         assert( err == sizeof(uint64_t));
 
-        data_log_free_offset = 0;
 
         /* Listen SIGINT signal */
         signal(SIGINT, &do_round_work);
@@ -614,7 +719,6 @@ int main(int argc, char *argv[])
             zlog_fini();
             return -2;
         }
-        last_request.length = 0;
 
 
         zlog_fini();

@@ -1003,7 +1003,7 @@ value_t bplus_tree_get_fuzzy(struct bplus_tree *tree, uint64_t key)
 {
     value_t *start = NULL;
     start = malloc(sizeof(value_t));
-    start->start = 0;
+    start->nbd_offset = 0;
     start->length = 0;
     // If we can't find a value references to the given key,
     // we should return a empty value whose fingerprint is zeros.
@@ -1027,7 +1027,7 @@ value_t bplus_tree_get_fuzzy(struct bplus_tree *tree, uint64_t key)
             while (node != NULL && key(node)[i] <= max) {
                 *start = data(node)[i];
 
-                if ((key >= start->start) && (key < start->length + start->start))
+                if ((key >= start->nbd_offset) && (key < start->length + start->nbd_offset))
                     return *start;
 
                 if (++i >= node->children) {

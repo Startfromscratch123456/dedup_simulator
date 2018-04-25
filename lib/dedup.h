@@ -8,7 +8,7 @@
 #define SIZE ( 11ull * 1024ull * 1024ull * 1024ull)
 #define HASH_LOG_BLOCK_SIZE ( 4 * 1024 )
 #define VIR_BLOCK_SIZE MAX_BLOCK_SIZE
-#define FINGERPRINT_SIZE 20
+#define FINGERPRINT_SIZE 16
 
 /* We advertise twice as many virtual blocks as we have physical blocks. */
 #define NPHYS_BLOCKS (SIZE / MIN_BLOCK_SIZE)
@@ -26,6 +26,7 @@
  * bits of the fingerprint, which allows us to store 1M entries, each 32B, for a
  * total cache that uses 32 MB of memory. */
 #define CACHE_SIZE 20
+#define MAXLINE 4096
 
 /* We use a free-list and next-fit algorithm to manage free data log */
 struct data_log_free_list_node {
@@ -55,9 +56,13 @@ struct block_map_entry {
     char        fingerprit[FINGERPRINT_SIZE];
 } block_map_entry;
 
-#define BOLD                 "\e[1m"
-#define NONE                 "\e[0m"
 
+
+typedef struct file_info_t {
+    char path[MAXLINE];
+    uint64_t size;
+    uint64_t chunks_n;
+}file_info;
 
 /* Forward declaration */
 static int read_one_block(void *buf, uint32_t len, uint64_t offset);
