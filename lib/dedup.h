@@ -21,6 +21,13 @@
     (ENTRIES_PER_BUCKET * NBUCKETS * sizeof(struct hash_index_entry))
 #define HASH_LOG_SIZE (NPHYS_BLOCKS * sizeof(struct hash_log_entry))
 
+/// Space mode
+#define MAX_BLOCK_SIZE ( 32 * 1024 )
+#define MIN_BLOCK_SIZE ( 2 * 1024 )
+#define ENTRIES_PER_SPACE ( MAX_BLOCK_SIZE / MIN_BLOCK_SIZE )
+#define SPACE_LENGTH MAX_BLOCK_SIZE
+#define SPACE_SIZE ( SPACE_LENGTH * NVIRT_BLOCKS )
+
 /* The size of the fingerprint cache, described in terms of how many bits are
  * used to determine the location of a cache line. Here, we use the first 20
  * bits of the fingerprint, which allows us to store 1M entries, each 32B, for a
