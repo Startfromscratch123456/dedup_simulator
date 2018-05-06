@@ -28,11 +28,16 @@
 #include "libhashfile.h"
 
 
+#define PRINTLN printf("\n")
+#define LOG_LINE 4096
+
 // ===================================================
 //                  Global Variables
 // ===================================================
 
 struct g_args_t {
+    int RW;
+    int MAP;
     uint32_t fingerprint_size;  // in bytes
     char *hash_filename;
     int hash_fd;
@@ -54,6 +59,11 @@ static uint64_t data_log_free_offset;
 enum mode{
     INIT_MODE = 0,
     RUN_MODE  = 1,
+    WRITE_MODE = 2,
+    READ_MODE = 3,
+    BPTREE_MODE = 4,
+    SPACE_MODE = 5,
+
 };
 
 // ===================================================
@@ -92,12 +102,22 @@ static void fingerprint_to_str(char *dest, char *src)
 static void usage()
 {
     fprintf(stderr, "Options:\n\n");
-    fprintf(stderr, "    -h, --help\n"  "\tdisplay the help infomation\n\n");
+
     fprintf(stderr, "    -d, --dataset\n" "\tdata set file\n");
     fprintf(stderr, "    -i, --init\n"  "\tspecify the nbd device and init\n\n");
     fprintf(stderr, "    -a, --hash-file\n"  "\tspecify the hash file\n\n");
     fprintf(stderr, "    -p, --physical-device\n"  "\tspecify the physical device or file\n\n");
+
+    fprintf(stderr, "\n");
     fprintf(stderr, "    -b, --btree\n"  "\tb+tree mapping mode and specify b+tree db file\n\n");
+    fprintf(stderr, "    -s, --space\n" "\t space mode\n");
+
+    fprintf(stderr, "\n");
+    printf(stderr, "     -w, --write\n"  "\twrite mode\n");
+    printf(stderr, "     -r, --read\n"  "\tread mode\n");
+
+    fprintf(stderr, "\n");
+    fprintf(stderr, "    -h, --help\n"  "\tdisplay the help infomation\n\n");
     exit(0);
 }
 
@@ -111,6 +131,15 @@ static int fingerprint_is_zero(char *fingerprint)
     return 1;
 }
 
+static void print_chunk_hash(const uint8_t *hash,
+                             int hash_size_in_bytes)
+{
+    int j;
+
+    printf("%.2hhx", hash[0]);
+    for (j = 1; j < hash_size_in_bytes; j++)
+        printf(":%.2hhx", hash[j]);
+}
 
 /**
  * Return the bucket which contains the given fingerprint
@@ -119,9 +148,9 @@ static int hash_index_get_bucket(char *hash, hash_bucket *bucket)
 {
     /* We don't need to look at the entire hash, just the last few bytes. */
     int32_t *hash_tail = (int32_t *)(hash + g_args.fingerprint_size - sizeof(int32_t));
-    int bucket_index = *hash_tail % NBUCKETS;
+    uint64_t bucket_index = *hash_tail % NBUCKETS;
     SEEK_TO_BUCKET(g_args.hash_fd, bucket_index);
-    int err = read(g_args.hash_fd, bucket,
+    ssize_t err = read(g_args.hash_fd, bucket,
             sizeof(struct hash_index_entry) * ENTRIES_PER_BUCKET);
     assert(err == sizeof(struct hash_index_entry) * ENTRIES_PER_BUCKET);
 
@@ -132,9 +161,9 @@ static int hash_index_put_bucket(char *hash, hash_bucket *bucket)
 {
     /* We don't need to look at the entire hash, just the last few bytes. */
     int32_t *hash_tail = (int32_t *)(hash + g_args.fingerprint_size - sizeof(int32_t));
-    int bucket_index = *hash_tail % NBUCKETS;
+    uint64_t bucket_index = *hash_tail % NBUCKETS;
     SEEK_TO_BUCKET(g_args.hash_fd, bucket_index);
-    int err = write(g_args.hash_fd, bucket,
+    ssize_t err = write(g_args.hash_fd, bucket,
             sizeof(struct hash_index_entry) * ENTRIES_PER_BUCKET);
     assert(err == sizeof(struct hash_index_entry) * ENTRIES_PER_BUCKET);
 
@@ -207,7 +236,7 @@ static uint64_t hash_log_new()
 {
     uint64_t new_block = hash_log_free_list;
     SEEK_TO_HASH_LOG(g_args.hash_fd, new_block);
-    int err = read(g_args.hash_fd, &hash_log_free_list, sizeof(uint64_t));
+    ssize_t err = read(g_args.hash_fd, &hash_log_free_list, sizeof(uint64_t));
     assert(err == sizeof(uint64_t));
     return new_block;
 }
@@ -218,7 +247,7 @@ static uint64_t hash_log_new()
 static int hash_log_free(uint64_t hash_log_address)
 {
     SEEK_TO_HASH_LOG(g_args.hash_fd, hash_log_address);
-    int err = write(g_args.hash_fd, &hash_log_free_list, sizeof(uint64_t));
+    ssize_t err = write(g_args.hash_fd, &hash_log_free_list, sizeof(uint64_t));
     assert(err == sizeof(uint64_t));
     hash_log_free_list = hash_log_address;
 
@@ -249,7 +278,8 @@ static u_int32_t get_cache_index(char *fingerprint)
      * consistent. So let's treat the first four bytes as an integer and take
      * the lower bits of that. */
     u_int32_t mask = (1 << CACHE_SIZE) - 1;
-    u_int32_t result = ((u_int32_t *)fingerprint)[0] & mask;
+//    u_int32_t result = ((u_int32_t *)fingerprint)[0] & mask;
+    uint32_t result = ((u_int32_t *) fingerprint)[0] % mask;
     assert(result < mask);
     return result;
 }
@@ -260,7 +290,7 @@ static u_int32_t get_cache_index(char *fingerprint)
 static struct hash_log_entry lookup_fingerprint(char *fingerprint)
 {
 
-    int err;
+    ssize_t err;
 
     // Search in CACHE
     u_int32_t index = get_cache_index(fingerprint);
@@ -289,20 +319,15 @@ static struct hash_log_entry lookup_fingerprint(char *fingerprint)
         assert(err == sizeof(struct hash_log_entry));
 
         u_int32_t j = get_cache_index(h.fingerprint);
-        memcpy(cache + j, &h, g_args.fingerprint_size);
+        memcpy(cache + j, &h, sizeof(struct hash_log_entry));
     }
 
     /* Now we should have looked up the fingerprint we wanted, along with a
      * bunch of others. */
 
     err = memcmp(fingerprint, cache[index].fingerprint, g_args.fingerprint_size);
-    if (err != 0) {
-        hash_log_address = hash_index_lookup(fingerprint);
-        SEEK_TO_HASH_LOG(g_args.hash_fd, hash_log_address);
-        struct hash_log_entry h_tmp;
-        err = read(g_args.hash_fd, &h_tmp, sizeof(struct hash_log_entry));
-//        fprintf(stderr, "hash log entry: %02x\nfingerprint: %02x\n", h_tmp.fingerprint, fingerprint);
-    }
+    assert( err == 0 );
+
 
     return cache[index];
 }
@@ -316,7 +341,7 @@ static int decrement_refcount(char *fingerprint)
     struct hash_log_entry hle;
     uint64_t hash_log_address = hash_index_lookup(fingerprint);
     SEEK_TO_HASH_LOG(g_args.hash_fd, hash_log_address);
-    int err = read(g_args.hash_fd, &hle, sizeof(struct hash_log_entry));
+    ssize_t err = read(g_args.hash_fd, &hle, sizeof(struct hash_log_entry));
     assert(err == sizeof(struct hash_log_entry));
 
     if (hle.ref_count > 1) {
@@ -347,11 +372,22 @@ static int write_to_disk(int fd, uint64_t size)
     return 0;
 }
 
+
+static int read_one_chunk(uint8_t *hash) {
+    /// Since the data set provides fingerprint directly, we don't need search from B+tree or Space
+    char log_string[LOG_LINE];
+    struct hash_log_entry hle = lookup_fingerprint((char*)hash);
+    sprintf(log_string, "[READ] | phy addr: %lu, chunk size: %lu\n", hle.data_log_offset, hle.block_size);
+    printf(log_string);
+
+    return 0;
+}
+
 static int write_one_chunk(uint64_t chunk_size, uint8_t *hash)
 {
-    char fingerprint[g_args.fingerprint_size];
-    fingerprint_to_str(fingerprint, hash);
-    printf("[Write] | chunk size: %lu, fingerprint: %s\n", chunk_size, fingerprint);
+    printf("[Write] | chunk size: %lu, fingerprint: ", chunk_size);
+    print_chunk_hash(hash, g_args.fingerprint_size);
+    PRINTLN;
 
 
     ssize_t ret;
@@ -366,7 +402,7 @@ static int write_one_chunk(uint64_t chunk_size, uint8_t *hash)
     struct hash_log_entry hle;
 
     // See if this fingerprint is already stored in HASH_LOG
-    hash_log_address = hash_index_lookup(hash);
+    hash_log_address = hash_index_lookup((char*)hash);
     if (hash_log_address == (uint64_t)-1) {
         // This chunk is new
         memcpy(hle.fingerprint, hash, g_args.fingerprint_size);
@@ -377,7 +413,7 @@ static int write_one_chunk(uint64_t chunk_size, uint8_t *hash)
         hash_log_address = hash_log_new();
 
         // Update hash index
-        hash_index_insert(hash, hash_log_address);
+        hash_index_insert((char*)hash, hash_log_address);
         // Update hash log
         SEEK_TO_HASH_LOG(g_args.hash_fd, hash_log_address);
         ret = write(g_args.hash_fd, &hle, sizeof(struct hash_log_entry));
@@ -400,70 +436,6 @@ static int write_one_chunk(uint64_t chunk_size, uint8_t *hash)
 }
 
 
-static int read_one_block(void *buf, uint32_t len, uint64_t offset)
-{
-
-    return 0;
-}
-
-static int dedup_read(void *buf, uint32_t len, uint64_t offset)
-{
-
-
-    char *bufi = buf;
-    struct block_map_entry bmap_entry;
-    struct hash_log_entry tmp_entry;
-
-    bmap_entry = bplus_tree_get_fuzzy(g_args.tree, offset);
-
-    /* If we don't BEGIN on a block boundary */
-    if (offset != bmap_entry.nbd_offset) {
-        if(bmap_entry.length == 0) {
-            memset(bufi, 0, len);
-            return 0;
-        }
-        uint32_t read_size = bmap_entry.length - (offset - bmap_entry.nbd_offset);
-        assert(read_size >= 0);
-
-
-        tmp_entry = lookup_fingerprint(bmap_entry.fingerprit);
-
-        read_one_block(bufi, read_size, tmp_entry.data_log_offset);
-        bufi += read_size;
-        len -= read_size;
-        offset += read_size;
-    }
-
-    while (len > 0 ) {
-        bmap_entry = bplus_tree_get_fuzzy(g_args.tree, offset);
-        if (len < bmap_entry.length)
-            break;
-        if (fingerprint_is_zero(bmap_entry.fingerprit)) {
-            memset(bufi, 0, len);
-            len = 0;
-            continue;
-        }
-        assert(bmap_entry.length != 0);
-        if (bmap_entry.length == 0) {
-            printf("error!\n");
-            memset(bufi, 0, len);
-            return 0;
-        }
-        // We read a complete block
-
-        tmp_entry = lookup_fingerprint(bmap_entry.fingerprit);
-        read_one_block(bufi, bmap_entry.length, tmp_entry.data_log_offset);
-        bufi += bmap_entry.length;
-        len -= bmap_entry.length;
-        offset += bmap_entry.length;
-    }
-    /* Now we get to the last block, it may be not a complete block*/
-    if (len != 0) {
-        read_one_block(bufi, len, offset);
-    }
-
-    return 0;
-}
 
 static void do_round_work()
 {
@@ -476,18 +448,7 @@ static void do_round_work()
     exit(0);
 }
 
-static void print_chunk_hash(uint64_t chunk_count, const uint8_t *hash,
-                             int hash_size_in_bytes)
-{
-    int j;
 
-    printf("Chunk %06"PRIu64 ": ", chunk_count);
-
-    printf("%.2hhx", hash[0]);
-    for (j = 1; j < hash_size_in_bytes; j++)
-        printf(":%.2hhx", hash[j]);
-    printf("\n");
-}
 
 static int read_datafile(char *datafile_name)
 {
@@ -497,7 +458,6 @@ static int read_datafile(char *datafile_name)
     uint64_t chunk_count;
     time_t scan_start_time;
     int ret;
-    char fingerpritn[g_args.fingerprint_size];
 
     handle = hashfile_open(datafile_name);
     if (!handle) {
@@ -526,6 +486,7 @@ static int read_datafile(char *datafile_name)
     }
 
     printf("Hashing method: %s\n", buf);
+    g_args.fingerprint_size = hashfile_hash_size(handle) / 8;
 
     /* Go over the files in a hashfile */
     printf("== List of files and hashes ==\n");
@@ -543,7 +504,7 @@ static int read_datafile(char *datafile_name)
             break;
 
 
-        printf("File path: %s\n", hashfile_curfile_path(handle));
+        printf("\nFile path: %s\n", hashfile_curfile_path(handle));
         printf("File size: %"PRIu64 " B\n",
                hashfile_curfile_size(handle));
         printf("Chunks number: %" PRIu64 "\n",
@@ -558,12 +519,12 @@ static int read_datafile(char *datafile_name)
 
             chunk_count++;
 
-            fingerprint_to_str(fingerpritn, ci->hash);
-            printf("%s\n", fingerpritn);
-            print_chunk_hash(chunk_count, ci->hash,
-                             hashfile_hash_size(handle) / 8);
+            if (g_args.RW == WRITE_MODE) {
+                write_one_chunk(ci->size, ci->hash);
+            } else if (g_args.RW == READ_MODE) {
+                read_one_chunk(ci->hash);
+            }
 
-            write_one_chunk(ci->size, ci->hash);
         }
     }
 
@@ -599,7 +560,7 @@ static int init()
 
 void static open_hash_file(char *filename)
 {
-    g_args.hash_fd = open64(filename, O_CREAT|O_RDWR|O_LARGEFILE);
+    g_args.hash_fd = open64(filename, O_CREAT|O_RDWR|O_LARGEFILE, 0644);
     assert(g_args.hash_fd != -1);
 }
 
@@ -609,37 +570,54 @@ void static open_hash_file(char *filename)
 void parse_command_line(int argc, char *argv[])
 {
     /* command line args */
-    const char *opt_string = "i:n:h:b:a:d";
+    const char *opt_string = "i:a:h:b:d:w:r";
     const struct option long_opts[] = {
             {"init", no_argument, NULL, 'i'},
-            {"nbd", no_argument, NULL, 'n'},
             {"hash-file", required_argument, NULL, 'a'},
             {"help", no_argument, NULL, 'h'},
             {"bplustree", required_argument, NULL, 'b'},
+            {"space", no_argument, NULL, 's'},
             {"dataset", required_argument, NULL, 'd'},
+            {"write", no_argument, NULL, 'w'},
+            {"read", no_argument, NULL, 'r'},
             {NULL, 0, NULL, NULL},
     };
 
     // default opts
     g_args.hash_filename = "./hash.db";
     g_args.bplustree_filename = "./bptree.db";
+    g_args.dataset_filename = "./coreutils-8.22.hash";
+    g_args.RW = READ_MODE;
+    g_args.MAP = BPTREE_MODE;
+    g_args.run_mode = RUN_MODE;
+//    g_args.run_mode = INIT_MODE;
 
     int opt = getopt_long(argc, argv, opt_string, long_opts, NULL);
     while( opt != -1 ) {
         switch(opt) {
+            case 'w':
+                g_args.run_mode = RUN_MODE;
+                g_args.RW = WRITE_MODE;
+                break;
+            case 'r':
+                g_args.run_mode = RUN_MODE;
+                g_args.RW = READ_MODE;
+                break;
             case 'a':   // hash data file
                 g_args.hash_filename = optarg;
                 break;
             case 'i':   // init mode
                 g_args.run_mode = INIT_MODE;
                 break;
-            case 'n':   // nbd device
-                g_args.run_mode = RUN_MODE;
-                break;
+
             case 'b':   // b+tree mode
                 g_args.bplustree_filename = optarg;
                 break;
-            case 'd':
+            case 's':
+                g_args.MAP = SPACE_MODE;
+                break;
+
+            case 'd':   // dataset file
                 g_args.dataset_filename = optarg;
                 break;
             case 'h':   // help
@@ -699,10 +677,12 @@ int main(int argc, char *argv[])
 
 
 
+
+
         cache = calloc(1 << CACHE_SIZE, sizeof(struct hash_log_entry));
 
         /* Init zlog */
-        err = zlog_init("../../config/zlog.conf");
+        err = zlog_init("../config/zlog.conf");
         if(err) {
             fprintf(stderr, "zlog init failed\n");
             return -1;
@@ -719,6 +699,8 @@ int main(int argc, char *argv[])
             zlog_fini();
             return -2;
         }
+
+        read_datafile(g_args.dataset_filename);
 
 
         zlog_fini();
