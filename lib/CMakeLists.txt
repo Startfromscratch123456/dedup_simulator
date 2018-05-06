@@ -1,3 +1,3 @@
-set(LIBRARY_OUTPUT_PATH ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/lib)
+set(LIBRARY_OUTPUT_PATH ${BUILD_DIR}/lib)
 add_library(hashfile STATIC libhashfile.c)
 add_library(bplustree STATIC bplustree.c)
