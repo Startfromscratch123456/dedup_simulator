@@ -4,6 +4,7 @@
 #define _FILE_OFFSET_BITS 64
 
 #include <sys/stat.h>
+#include <stdint.h>
 #include <unistd.h>
 #include <time.h>
 #include <assert.h>
@@ -36,6 +37,10 @@
 // ===================================================
 
 struct g_args_t {
+    uint64_t n_hash_index;
+    uint64_t n_hash_log;
+    uint64_t n_bpt_node;
+    int image_fd;
     int RW;
     int MAP;
     uint32_t fingerprint_size;  // in bytes
@@ -72,27 +77,24 @@ enum mode{
 
 #define SEEK_TO_BUCKET(fd, i) \
     do { \
-        lseek64((fd), (i)*sizeof(hash_bucket), SEEK_SET); \
+        if (g_args.MAP == BPTREE_MODE ) \
+            lseek64((fd), (i)*sizeof(hash_bucket), SEEK_SET); \
+        else if (g_args.MAP == SPACE_MODE) \
+            lseek64((fd), SPACE_SIZE + (i)*sizeof(hash_bucket), SEEK_SET); \
     } while(0)
 
 #define SEEK_TO_HASH_LOG(fd, i) \
     do { \
-        lseek64((fd), HASH_INDEX_SIZE + (i) * sizeof(struct hash_log_entry), SEEK_SET); \
+        if (g_args.MAP == BPTREE_MODE ) \
+            lseek64((fd), HASH_INDEX_SIZE + (i) * sizeof(struct hash_log_entry), SEEK_SET); \
+        else if (g_args.MAP == SPACE_MODE) \
+            lseek64((fd), SPACE_SIZE + HASH_INDEX_SIZE + (i) * sizeof(struct hash_log_entry), SEEK_SET); \
     } while (0)
 
-
-#define SEEK_TO_DATA_LOG(fd, offset) \
+#define SEEK_TO_SPACE(fd, i) \
     do { \
-        lseek64((fd), (offset), SEEK_SET); \
-    } while(0)
-
-
-static void fingerprint_to_str(char *dest, char *src)
-{
-    for (int i=0; i<g_args.fingerprint_size; i++)
-        sprintf(&dest[i*2], "%02x", (unsigned int)src[i]);
-
-}
+        lseek64((fd), (i) * SPACE_LENGTH, SEEK_SET); \
+    } while (0)
 
 // ===================================================
 //                  Function Defines
@@ -150,8 +152,7 @@ static int hash_index_get_bucket(char *hash, hash_bucket *bucket)
     int32_t *hash_tail = (int32_t *)(hash + g_args.fingerprint_size - sizeof(int32_t));
     uint64_t bucket_index = *hash_tail % NBUCKETS;
     SEEK_TO_BUCKET(g_args.hash_fd, bucket_index);
-    ssize_t err = read(g_args.hash_fd, bucket,
-            sizeof(struct hash_index_entry) * ENTRIES_PER_BUCKET);
+    ssize_t err = read(g_args.hash_fd, bucket, sizeof(struct hash_index_entry) * ENTRIES_PER_BUCKET);
     assert(err == sizeof(struct hash_index_entry) * ENTRIES_PER_BUCKET);
 
     return 0;
@@ -163,8 +164,7 @@ static int hash_index_put_bucket(char *hash, hash_bucket *bucket)
     int32_t *hash_tail = (int32_t *)(hash + g_args.fingerprint_size - sizeof(int32_t));
     uint64_t bucket_index = *hash_tail % NBUCKETS;
     SEEK_TO_BUCKET(g_args.hash_fd, bucket_index);
-    ssize_t err = write(g_args.hash_fd, bucket,
-            sizeof(struct hash_index_entry) * ENTRIES_PER_BUCKET);
+    ssize_t err = write(g_args.hash_fd, bucket, sizeof(struct hash_index_entry) * ENTRIES_PER_BUCKET);
     assert(err == sizeof(struct hash_index_entry) * ENTRIES_PER_BUCKET);
 
     return 0;
@@ -184,20 +184,56 @@ static int hash_index_insert(char *hash, uint64_t hash_log_address)
             return 0;
         }
 
-    // Debug info. If we get to here, error occurs.
-    char str_fp[SHA_DIGEST_LENGTH*2+1];
-    fingerprint_to_str(str_fp, hash);
-    printf("[HASH INDEX INSERT] | Debug | Hash: %s\n", str_fp);
-
-    char log_line[1024*1024];
-    sprintf(log_line, "[HASH INDEX INSERT] | Debug | Hash: %s", str_fp);
-    zlog_info(g_args.log_error, log_line);
-
     /* We failed to find a slot. In the future it would be nice to have a more
      * sophisticated hash table that resolves collisions better. But for now we
      * just give up. */
     assert(0);
 }
+
+
+static int hash_get_space(uint64_t offset, hash_space *space)
+{
+    uint64_t space_n = offset / SPACE_LENGTH;
+    SEEK_TO_SPACE(g_args.hash_fd, space_n);
+    ssize_t err = read(g_args.hash_fd, space, sizeof(struct block_map_entry) * ENTRIES_PER_SPACE);
+    assert(err == sizeof(struct block_map_entry) * ENTRIES_PER_SPACE);
+
+    return 0;
+}
+
+
+static int hash_put_space(uint64_t offset, hash_space *space)
+{
+    uint64_t space_n = offset / SPACE_LENGTH;
+    SEEK_TO_SPACE(g_args.hash_fd, space_n);
+    ssize_t err = write(g_args.hash_fd, space, sizeof(struct block_map_entry) * ENTRIES_PER_SPACE);
+    assert(err == sizeof(struct block_map_entry) * ENTRIES_PER_SPACE);
+
+    return 0;
+}
+
+static int hash_space_insert(uint64_t offset, struct block_map_entry ble)
+{
+    hash_space space;
+
+    hash_get_space(offset, &space);
+
+    for (int i = 0; i < ENTRIES_PER_SPACE; i ++) {
+        if (space[i].length == 0) {
+            /// We have found an empty slot.
+            memcpy(space + i, &block_map_entry, sizeof(struct block_map_entry));
+            hash_put_space(offset, &space);
+            return 0;
+        }
+    }
+
+    /// Failed to find a slot.
+    assert(0);
+}
+
+
+
+
 
 /**
  * Search the hash log address of given hash
@@ -257,7 +293,10 @@ static int hash_log_free(uint64_t hash_log_address)
 
 static uint64_t physical_block_new(uint64_t block_size)
 {
-    return 0;
+    uint64_t offset = data_log_free_offset;
+    data_log_free_offset += block_size;
+
+    return offset;
 }
 
 static int physical_block_free(uint64_t offest, uint64_t size)
@@ -278,9 +317,12 @@ static u_int32_t get_cache_index(char *fingerprint)
      * consistent. So let's treat the first four bytes as an integer and take
      * the lower bits of that. */
     u_int32_t mask = (1 << CACHE_SIZE) - 1;
-//    u_int32_t result = ((u_int32_t *)fingerprint)[0] & mask;
-    uint32_t result = ((u_int32_t *) fingerprint)[0] % mask;
+    u_int32_t result = ((u_int32_t *)fingerprint)[0] & mask;
+    if (result > 20) {
+        int i = 0;
+    }
     assert(result < mask);
+
     return result;
 }
 
@@ -310,7 +352,7 @@ static struct hash_log_entry lookup_fingerprint(char *fingerprint)
     // ==========================================
     /* Now let's look up everything in the 4K block containing the hash log
      * entry we want. This way we can cache it all for later. */
-    hash_log_address -= hash_log_address % HASH_LOG_BLOCK_SIZE;
+    hash_log_address = hash_log_address % HASH_LOG_BLOCK_SIZE;
     SEEK_TO_HASH_LOG(g_args.hash_fd, hash_log_address);
     struct hash_log_entry h;
 
@@ -377,26 +419,32 @@ static int read_one_chunk(uint8_t *hash) {
     /// Since the data set provides fingerprint directly, we don't need search from B+tree or Space
     char log_string[LOG_LINE];
     struct hash_log_entry hle = lookup_fingerprint((char*)hash);
-    sprintf(log_string, "[READ] | phy addr: %lu, chunk size: %lu\n", hle.data_log_offset, hle.block_size);
+    sprintf(log_string, "[READ] | phy addr: %lu, chunk size: %lu, hash: ", hle.data_log_offset, hle.block_size);
+
+
     printf(log_string);
+    print_chunk_hash(hash, g_args.fingerprint_size);
+    PRINTLN;
 
     return 0;
 }
 
+
+
 static int write_one_chunk(uint64_t chunk_size, uint8_t *hash)
 {
-    printf("[Write] | chunk size: %lu, fingerprint: ", chunk_size);
-    print_chunk_hash(hash, g_args.fingerprint_size);
-    PRINTLN;
-
-
     ssize_t ret;
+    char log_line[MAXLINE];
     struct block_map_entry bme;
     bme.nbd_offset = get_nbd_offset(chunk_size);
     bme.length = chunk_size;
     memcpy(bme.fingerprit, hash, g_args.fingerprint_size);
+    g_args.n_bpt_node ++;
 
-    bplus_tree_put(g_args.tree, bme.nbd_offset, bme);
+    if (g_args.MAP == BPTREE_MODE)
+        bplus_tree_put(g_args.tree, bme.nbd_offset, bme);
+    else if (g_args.MAP == SPACE_MODE)
+        hash_space_insert(bme.nbd_offset, bme);
 
     uint64_t hash_log_address;
     struct hash_log_entry hle;
@@ -405,10 +453,19 @@ static int write_one_chunk(uint64_t chunk_size, uint8_t *hash)
     hash_log_address = hash_index_lookup((char*)hash);
     if (hash_log_address == (uint64_t)-1) {
         // This chunk is new
+
+        g_args.n_hash_log ++;
+        g_args.n_hash_index ++;
+
         memcpy(hle.fingerprint, hash, g_args.fingerprint_size);
         hle.data_log_offset = physical_block_new(chunk_size);
         hle.ref_count = 1;
         hle.block_size = chunk_size;
+
+        sprintf(log_line, "[NEW] | len: %lu, offset: %lu", chunk_size, hle.data_log_offset);
+        printf(log_line);
+        PRINTLN;
+        zlog_info(g_args.write_block_category, log_line);
 
         hash_log_address = hash_log_new();
 
@@ -418,6 +475,7 @@ static int write_one_chunk(uint64_t chunk_size, uint8_t *hash)
         SEEK_TO_HASH_LOG(g_args.hash_fd, hash_log_address);
         ret = write(g_args.hash_fd, &hle, sizeof(struct hash_log_entry));
         assert(ret == sizeof(struct hash_log_entry));
+        // We don't really write data to disk.
         write_to_disk(0, chunk_size);
 
     } else {
@@ -429,6 +487,11 @@ static int write_one_chunk(uint64_t chunk_size, uint8_t *hash)
         SEEK_TO_HASH_LOG(g_args.hash_fd, hash_log_address);
         ret = write(g_args.hash_fd, &hle, sizeof(struct hash_log_entry));
         assert(ret == sizeof(struct hash_log_entry));
+
+        sprintf(log_line, "[REDUNDANT] | len: %lu, offset: %lu", chunk_size, hle.data_log_offset);
+        printf(log_line);
+        PRINTLN;
+        zlog_info(g_args.write_block_category, log_line);
     }
 
     return 0;
@@ -466,26 +529,6 @@ static int read_datafile(char *datafile_name)
     }
 
     /* Print some information about the hash file */
-    scan_start_time = hashfile_start_time(handle);
-    printf("Collected at [%s] on %s",
-           hashfile_sysid(handle),
-           ctime(&scan_start_time));
-
-    ret = hashfile_chunking_method_str(handle, buf, MAXLINE);
-    if (ret < 0) {
-        fprintf(stderr, "Unrecognized chunking method: %d!", errno);
-        return -1;
-    }
-
-    printf("Chunking method: %s", buf);
-
-    ret = hashfile_hashing_method_str(handle, buf, MAXLINE);
-    if (ret < 0) {
-        fprintf(stderr, "Unrecognized hashing method: %d!", errno);
-        return -1;
-    }
-
-    printf("Hashing method: %s\n", buf);
     g_args.fingerprint_size = hashfile_hash_size(handle) / 8;
 
     /* Go over the files in a hashfile */
@@ -502,7 +545,6 @@ static int read_datafile(char *datafile_name)
         /* exit the loop if it was the last file */
         if (ret == 0)
             break;
-
 
         printf("\nFile path: %s\n", hashfile_curfile_path(handle));
         printf("File size: %"PRIu64 " B\n",
@@ -586,7 +628,7 @@ void parse_command_line(int argc, char *argv[])
     // default opts
     g_args.hash_filename = "./hash.db";
     g_args.bplustree_filename = "./bptree.db";
-    g_args.dataset_filename = "./coreutils-8.22.hash";
+    g_args.dataset_filename = "/home/cyril/dataset/kernel/fslhomes-kernel";
     g_args.RW = READ_MODE;
     g_args.MAP = BPTREE_MODE;
     g_args.run_mode = RUN_MODE;
@@ -630,9 +672,6 @@ void parse_command_line(int argc, char *argv[])
 }
 
 
-
-
-
 /**
  * Main entry
  */
@@ -643,13 +682,19 @@ int main(int argc, char *argv[])
     /* First, we parse the cmd line */
     parse_command_line(argc, argv);
 
-    g_args.tree = bplus_tree_init(g_args.bplustree_filename, 16777216*16);
+    g_args.tree = bplus_tree_init(g_args.bplustree_filename, 4096);
     open_hash_file(g_args.hash_filename);
 
 
 
+
     /* Init zeros */
-    zeros = mmap(NULL, HASH_INDEX_SIZE, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, g_args.hash_fd, 0);
+    if (g_args.MAP == BPTREE_MODE) {
+        zeros = mmap(NULL, HASH_INDEX_SIZE, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, g_args.hash_fd, 0);
+    }
+    else if (g_args.MAP == SPACE_MODE) {
+        zeros = mmap(NULL, SPACE_SIZE + HASH_INDEX_SIZE, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, g_args.hash_fd, 0);
+    }
     assert(zeros != (void *) -1);
 
 
@@ -665,6 +710,9 @@ int main(int argc, char *argv[])
     ////////////        NORMAL MODE       //////////
     ////////////////////////////////////////////////
     } else if ( g_args.run_mode == RUN_MODE ){
+        g_args.n_bpt_node = 0;
+        g_args.n_hash_index = 0;
+        g_args.n_hash_log = 0;
         /* By convention the first entry in the hash log is a pointer to the hash
          * log free list. Likewise for the data log. */
         SEEK_TO_HASH_LOG(g_args.hash_fd, 0);
@@ -675,10 +723,7 @@ int main(int argc, char *argv[])
         /* Listen SIGINT signal */
         signal(SIGINT, &do_round_work);
 
-
-
-
-
+        /// 1 << CACHE_SIZE = 2^CACHE_SIZE
         cache = calloc(1 << CACHE_SIZE, sizeof(struct hash_log_entry));
 
         /* Init zlog */
@@ -701,6 +746,11 @@ int main(int argc, char *argv[])
         }
 
         read_datafile(g_args.dataset_filename);
+
+        printf("\n\n nB+Tree size: %lu, Hash Index size: %lu, Hash Log size: %lu\n",
+               g_args.n_bpt_node * sizeof(struct block_map_entry),
+                       g_args.n_hash_index* sizeof(struct hash_index_entry),
+                               g_args.n_hash_log* sizeof(struct hash_log_entry));
 
 
         zlog_fini();

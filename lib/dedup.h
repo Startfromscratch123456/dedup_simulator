@@ -5,10 +5,10 @@
 
 #define MIN_BLOCK_SIZE (2 * 1024)
 #define MAX_BLOCK_SIZE (32 * 1024)
-#define SIZE ( 11ull * 1024ull * 1024ull * 1024ull)
+#define SIZE ( 40ull * 1024ull * 1024ull * 1024ull)
 #define HASH_LOG_BLOCK_SIZE ( 4 * 1024 )
 #define VIR_BLOCK_SIZE MAX_BLOCK_SIZE
-#define FINGERPRINT_SIZE 16
+#define FINGERPRINT_SIZE 20
 
 /* We advertise twice as many virtual blocks as we have physical blocks. */
 #define NPHYS_BLOCKS (SIZE / MIN_BLOCK_SIZE)
@@ -30,8 +30,8 @@
 
 /* The size of the fingerprint cache, described in terms of how many bits are
  * used to determine the location of a cache line. Here, we use the first 20
- * bits of the fingerprint, which allows us to store 1M entries, each 32B, for a
- * total cache that uses 32 MB of memory. */
+ * bits of the fingerprint, which allows us to store 1M entries, each 40B, for a
+ * total cache that uses 40 MB of memory. */
 #define CACHE_SIZE 20
 #define MAXLINE 4096
 
@@ -57,12 +57,14 @@ struct hash_log_entry {
 
 typedef struct hash_index_entry hash_bucket[ENTRIES_PER_BUCKET];
 
+
 struct block_map_entry {
     uint64_t    nbd_offset;
     uint64_t    length;
     char        fingerprit[FINGERPRINT_SIZE];
 } block_map_entry;
 
+typedef struct block_map_entry hash_space[ENTRIES_PER_SPACE];
 
 
 typedef struct file_info_t {
