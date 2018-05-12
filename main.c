@@ -19,12 +19,12 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <getopt.h>
-#include <sys/stat.h>
 #include <signal.h>
 #include <zlog.h>       // log
 #include "dedup.h"
 #include <stdbool.h>
 #include <time.h>
+#include <malloc.h>
 #include "bplustree.h"
 #include "libhashfile.h"
 
@@ -53,6 +53,7 @@ struct g_args_t {
     zlog_category_t* write_block_category;
     zlog_category_t* log_error;
     struct bplus_tree *tree;
+    bool log_on;
 };
 struct g_args_t g_args;
 
@@ -91,10 +92,16 @@ enum mode{
             lseek64((fd), SPACE_SIZE + HASH_INDEX_SIZE + (i) * sizeof(struct hash_log_entry), SEEK_SET); \
     } while (0)
 
-#define SEEK_TO_SPACE(fd, i) \
-    do { \
-        lseek64((fd), (i) * SPACE_LENGTH, SEEK_SET); \
-    } while (0)
+//#define SEEK_TO_SPACE(fd, i) \
+//    do { \
+//        lseek64((fd), (i) * SPACE_LENGTH, SEEK_SET); \
+//    } while (0)
+
+static void SEEK_TO_SPACE(const int fd, const uint64_t i)
+{
+    off_t err = lseek64(fd, i * SPACE_LENGTH, SEEK_SET);
+    assert(err != -1);
+}
 
 // ===================================================
 //                  Function Defines
@@ -465,7 +472,10 @@ static int write_one_chunk(uint64_t chunk_size, uint8_t *hash)
         sprintf(log_line, "[NEW] | len: %lu, offset: %lu", chunk_size, hle.data_log_offset);
         printf(log_line);
         PRINTLN;
-        zlog_info(g_args.write_block_category, log_line);
+        if (g_args.log_on) {
+            zlog_info(g_args.write_block_category, log_line);
+        }
+
 
         hash_log_address = hash_log_new();
 
@@ -491,7 +501,10 @@ static int write_one_chunk(uint64_t chunk_size, uint8_t *hash)
         sprintf(log_line, "[REDUNDANT] | len: %lu, offset: %lu", chunk_size, hle.data_log_offset);
         printf(log_line);
         PRINTLN;
-        zlog_info(g_args.write_block_category, log_line);
+        if (g_args.log_on) {
+            zlog_info(g_args.write_block_category, log_line);
+        }
+
     }
 
     return 0;
@@ -500,7 +513,7 @@ static int write_one_chunk(uint64_t chunk_size, uint8_t *hash)
 
 
 
-static void do_round_work()
+static void receive_sigint(int sig)
 {
     printf("Received SIGINT signal! Exiting...\n");
     ssize_t  ret;
@@ -508,6 +521,12 @@ static void do_round_work()
     ret = write(g_args.hash_fd, &hash_log_free_list, sizeof(uint64_t));
     assert(ret == sizeof(uint64_t));
 
+    if (g_args.log_on) {
+        zlog_fini();
+    }
+    if (g_args.MAP == BPTREE_MODE) {
+        bplus_tree_deinit(g_args.tree);
+    }
     exit(0);
 }
 
@@ -581,34 +600,48 @@ static int read_datafile(char *datafile_name)
 static int init()
 {
     uint64_t i;
-    int err;
-
+    ssize_t err;
 
     /* We now initialize the hash log and data log. These start out empty, so we
      * put everything in the free list. It might be more efficient to stage this
      * in memory and then write it out in larger blocks. But the Linux buffer
      * cache will probably take care of that anyway for now. */
-    for (i = 1; i <= NPHYS_BLOCKS; i++) {
+
+//    zeros = mmap(NULL, 1024 * 1024 * 1024, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+//    ssize_t remaining = SPACE_SIZE + HASH_INDEX_SIZE;
+//    for (; remaining > 0; ) {
+//        err = write(g_args.hash_fd, zeros, 1024 * 1024 * 1024);
+//        assert(err == 1024 * 1024 * 1024);
+//        remaining -= 1024 * 1024 * 1024;
+//    }
+//    munmap(zeros, 1024 * 1024 * 1024);
+
+
+    hash_space space;
+    memset(&space, 0, sizeof(hash_space));
+    for (i = 0; i < N_SPACES; i++) {
+        SEEK_TO_SPACE(g_args.hash_fd, i);
+        err = write(g_args.hash_fd, &space, sizeof(hash_space));
+        assert(err == sizeof(hash_space));
+    }
+
+    for (i = 1; i <= N_BLOCKS; i++) {
         SEEK_TO_HASH_LOG(g_args.hash_fd, i - 1);
         err = write(g_args.hash_fd, &i, sizeof(uint64_t));
         assert(err == sizeof(uint64_t));
     }
 
+
     return 0;
 }
 
-
-
-
 void static open_hash_file(char *filename)
 {
-    g_args.hash_fd = open64(filename, O_CREAT|O_RDWR|O_LARGEFILE, 0644);
+    g_args.hash_fd = open64(filename, O_CREAT|O_RDWR|O_LARGEFILE, 0775);
     assert(g_args.hash_fd != -1);
 }
 
-/**
- * Parse cmd args
- */
+
 void parse_command_line(int argc, char *argv[])
 {
     /* command line args */
@@ -630,9 +663,8 @@ void parse_command_line(int argc, char *argv[])
     g_args.bplustree_filename = "./bptree.db";
     g_args.dataset_filename = "/home/cyril/dataset/kernel/fslhomes-kernel";
     g_args.RW = READ_MODE;
-    g_args.MAP = BPTREE_MODE;
+    g_args.MAP = SPACE_MODE;
     g_args.run_mode = RUN_MODE;
-//    g_args.run_mode = INIT_MODE;
 
     int opt = getopt_long(argc, argv, opt_string, long_opts, NULL);
     while( opt != -1 ) {
@@ -681,22 +713,12 @@ int main(int argc, char *argv[])
 
     /* First, we parse the cmd line */
     parse_command_line(argc, argv);
-
-    g_args.tree = bplus_tree_init(g_args.bplustree_filename, 4096);
+    if (g_args.MAP == BPTREE_MODE)
+        g_args.tree = bplus_tree_init(g_args.bplustree_filename, 4096);
     open_hash_file(g_args.hash_filename);
 
-
-
-
-    /* Init zeros */
-    if (g_args.MAP == BPTREE_MODE) {
-        zeros = mmap(NULL, HASH_INDEX_SIZE, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, g_args.hash_fd, 0);
-    }
-    else if (g_args.MAP == SPACE_MODE) {
-        zeros = mmap(NULL, SPACE_SIZE + HASH_INDEX_SIZE, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, g_args.hash_fd, 0);
-    }
-    assert(zeros != (void *) -1);
-
+    /// some settings
+    g_args.log_on = false;
 
     ////////////////////////////////////////////////
     ////////////         INIT MODE        //////////
@@ -704,7 +726,10 @@ int main(int argc, char *argv[])
     if ( g_args.run_mode == INIT_MODE ) {
         fprintf(stdout, "Performing Initialization!\n");
         init();
-        bplus_tree_deinit(g_args.tree);
+        if (g_args.MAP == BPTREE_MODE) {
+            bplus_tree_deinit(g_args.tree);
+        }
+        close(g_args.hash_fd);
         return 0;
     ////////////////////////////////////////////////
     ////////////        NORMAL MODE       //////////
@@ -715,46 +740,60 @@ int main(int argc, char *argv[])
         g_args.n_hash_log = 0;
         /* By convention the first entry in the hash log is a pointer to the hash
          * log free list. Likewise for the data log. */
-        SEEK_TO_HASH_LOG(g_args.hash_fd, 0);
-        err = read(g_args.hash_fd, &hash_log_free_list, sizeof(uint64_t));
-        assert( err == sizeof(uint64_t));
+//        SEEK_TO_HASH_LOG(g_args.hash_fd, 0);
+//        err = read(g_args.hash_fd, &hash_log_free_list, sizeof(uint64_t));
+//        assert(err == sizeof(uint64_t));
+        hash_log_free_list = 1;
 
 
         /* Listen SIGINT signal */
-        signal(SIGINT, &do_round_work);
+        signal(SIGINT, &receive_sigint);
 
         /// 1 << CACHE_SIZE = 2^CACHE_SIZE
         cache = calloc(1 << CACHE_SIZE, sizeof(struct hash_log_entry));
 
-        /* Init zlog */
-        err = zlog_init("../config/zlog.conf");
-        if(err) {
-            fprintf(stderr, "zlog init failed\n");
-            return -1;
+        if (g_args.log_on) {
+            /* Init zlog */
+            err = zlog_init("../config/zlog.conf");
+            if(err) {
+                fprintf(stderr, "zlog init failed\n");
+                return -1;
+            }
+            g_args.write_block_category = zlog_get_category("ds");
+            if (!g_args.write_block_category) {
+                fprintf(stderr, "get ds_log_category failed\n");
+                zlog_fini();
+                return -2;
+            }
+            g_args.log_error = zlog_get_category("ds_error");
+            if (!g_args.log_error) {
+                fprintf(stderr, "get log_error_category failed\n");
+                zlog_fini();
+                return -2;
+            }
         }
-        g_args.write_block_category = zlog_get_category("write_block");
-        if (!g_args.write_block_category) {
-            fprintf(stderr, "get write_block_category failed\n");
-            zlog_fini();
-            return -2;
-        }
-        g_args.log_error = zlog_get_category("error");
-        if (!g_args.log_error) {
-            fprintf(stderr, "get log_error failed\n");
-            zlog_fini();
-            return -2;
-        }
+
 
         read_datafile(g_args.dataset_filename);
 
-        printf("\n\n nB+Tree size: %lu, Hash Index size: %lu, Hash Log size: %lu\n",
-               g_args.n_bpt_node * sizeof(struct block_map_entry),
-                       g_args.n_hash_index* sizeof(struct hash_index_entry),
-                               g_args.n_hash_log* sizeof(struct hash_log_entry));
+        if (g_args.RW == WRITE_MODE)
+            printf("\n\n B+Tree(/Space) size: %.3f M, Hash Index size: %.3f M, Hash Log size: %.3f M\n",
+                   g_args.n_bpt_node * sizeof(struct block_map_entry)/1024.0f/1024.0f,
+                           g_args.n_hash_index* sizeof(struct hash_index_entry)/1024.0f/1024.0f,
+                                   g_args.n_hash_log* sizeof(struct hash_log_entry)/1024.0f/1024.0f);
 
+        SEEK_TO_HASH_LOG(g_args.hash_fd, 0);
+        err = write(g_args.hash_fd, &hash_log_free_list, sizeof(uint64_t));
+        assert(err == sizeof(uint64_t));
 
-        zlog_fini();
-        bplus_tree_deinit(g_args.tree);
+        if (g_args.log_on) {
+            zlog_fini();
+        }
+
+        if (g_args.MAP == BPTREE_MODE) {
+            bplus_tree_deinit(g_args.tree);
+        }
+        close(g_args.hash_fd);
         return 0;
     }
 }
