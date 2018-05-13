@@ -72,6 +72,9 @@ enum mode{
 
 };
 
+clock_t write_space = 0;
+clock_t write_tree = 0;
+
 // ===================================================
 //               Tool Functions: Seek
 // ===================================================
@@ -421,7 +424,6 @@ static int write_to_disk(int fd, uint64_t size)
     return 0;
 }
 
-
 static int read_one_chunk(uint8_t *hash) {
     /// Since the data set provides fingerprint directly, we don't need search from B+tree or Space
     char log_string[LOG_LINE];
@@ -436,22 +438,54 @@ static int read_one_chunk(uint8_t *hash) {
     return 0;
 }
 
+static int read_one_chunk_by_off(uint64_t offset, void* buf)
+{
+    struct block_map_entry ble;
+    char log_line[MAXLINE];
+
+    if (g_args.MAP == BPTREE_MODE) {
+        ble = bplus_tree_get_fuzzy(g_args.tree, offset);
+    } else {
+        hash_space space;
+        hash_get_space(offset, &space);
+        for (int i = 0; i < ENTRIES_PER_SPACE; i ++) {
+            if (space[i].nbd_offset < offset && space[i].nbd_offset + space[i].length > offset) {
+                ble = space[i];
+            }
+        }
+    }
+    read_one_chunk((uint8_t *)ble.fingerprit);
+}
 
 
 static int write_one_chunk(uint64_t chunk_size, uint8_t *hash)
 {
+    clock_t w_space_start;
+    clock_t w_space_end;
+    clock_t w_tree_start;
+    clock_t w_tree_end;
     ssize_t ret;
     char log_line[MAXLINE];
     struct block_map_entry bme;
+
     bme.nbd_offset = get_nbd_offset(chunk_size);
     bme.length = chunk_size;
     memcpy(bme.fingerprit, hash, g_args.fingerprint_size);
     g_args.n_bpt_node ++;
 
-    if (g_args.MAP == BPTREE_MODE)
+    if (g_args.MAP == BPTREE_MODE) {
+        w_tree_start = clock();
         bplus_tree_put(g_args.tree, bme.nbd_offset, bme);
-    else if (g_args.MAP == SPACE_MODE)
+        w_tree_end = clock();
+        write_tree += w_tree_end - w_tree_start;
+    }
+    else if (g_args.MAP == SPACE_MODE) {
+        w_space_start = clock();
         hash_space_insert(bme.nbd_offset, bme);
+        w_space_end = clock();
+        write_space += w_space_end - w_space_start;
+    }
+
 
     uint64_t hash_log_address;
     struct hash_log_entry hle;
@@ -538,7 +572,6 @@ static int read_datafile(char *datafile_name)
     struct hashfile_handle *handle;
     const struct chunk_info *ci;
     uint64_t chunk_count;
-    time_t scan_start_time;
     int ret;
 
     handle = hashfile_open(datafile_name);
@@ -583,7 +616,9 @@ static int read_datafile(char *datafile_name)
             if (g_args.RW == WRITE_MODE) {
                 write_one_chunk(ci->size, ci->hash);
             } else if (g_args.RW == READ_MODE) {
-                read_one_chunk(ci->hash);
+                g_args.cur_nbd_offset += ci->size;
+                read_one_chunk_by_off(g_args.cur_nbd_offset, NULL);
+//                read_one_chunk(ci->hash);
             }
 
         }
@@ -617,13 +652,13 @@ static int init()
 //    munmap(zeros, 1024 * 1024 * 1024);
 
 
-    hash_space space;
-    memset(&space, 0, sizeof(hash_space));
-    for (i = 0; i < N_SPACES; i++) {
-        SEEK_TO_SPACE(g_args.hash_fd, i);
-        err = write(g_args.hash_fd, &space, sizeof(hash_space));
-        assert(err == sizeof(hash_space));
-    }
+//    hash_space space;
+//    memset(&space, 0, sizeof(hash_space));
+//    for (i = 0; i < N_SPACES; i++) {
+//        SEEK_TO_SPACE(g_args.hash_fd, i);
+//        err = write(g_args.hash_fd, &space, sizeof(hash_space));
+//        assert(err == sizeof(hash_space));
+//    }
 
     for (i = 1; i <= N_BLOCKS; i++) {
         SEEK_TO_HASH_LOG(g_args.hash_fd, i - 1);
@@ -663,7 +698,7 @@ void parse_command_line(int argc, char *argv[])
     g_args.bplustree_filename = "./bptree.db";
     g_args.dataset_filename = "/home/cyril/dataset/kernel/fslhomes-kernel";
     g_args.RW = READ_MODE;
-    g_args.MAP = SPACE_MODE;
+    g_args.MAP = BPTREE_MODE;
     g_args.run_mode = RUN_MODE;
 
     int opt = getopt_long(argc, argv, opt_string, long_opts, NULL);
@@ -776,11 +811,20 @@ int main(int argc, char *argv[])
 
         read_datafile(g_args.dataset_filename);
 
-        if (g_args.RW == WRITE_MODE)
-            printf("\n\n B+Tree(/Space) size: %.3f M, Hash Index size: %.3f M, Hash Log size: %.3f M\n",
-                   g_args.n_bpt_node * sizeof(struct block_map_entry)/1024.0f/1024.0f,
-                           g_args.n_hash_index* sizeof(struct hash_index_entry)/1024.0f/1024.0f,
-                                   g_args.n_hash_log* sizeof(struct hash_log_entry)/1024.0f/1024.0f);
+        if (g_args.RW == WRITE_MODE) {
+            printf("\n\n===================== SIZE ======================\n");
+            printf("B+Tree(/Space) size: %.3f M.\n", g_args.n_bpt_node * sizeof(struct block_map_entry)/1024.0f/1024.0f);
+            printf("Hash Index size: %.3f M.\n", g_args.n_hash_index* sizeof(struct hash_index_entry)/1024.0f/1024.0f);
+            printf("Hash Log size: %.3f M.\n", g_args.n_hash_log* sizeof(struct hash_log_entry)/1024.0f/1024.0f);
+            printf("\n===================== TIME ======================\n");
+            if (g_args.MAP == SPACE_MODE) {
+                printf("Write Space: %.3f s.\n", (float)write_space/CLOCKS_PER_SEC);
+            } else {
+                printf("Write Tree: %.3f s.\n", (float)write_tree/CLOCKS_PER_SEC);
+            }
+        }
+
+
 
         SEEK_TO_HASH_LOG(g_args.hash_fd, 0);
         err = write(g_args.hash_fd, &hash_log_free_list, sizeof(uint64_t));
