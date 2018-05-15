@@ -2,7 +2,6 @@
  * Copyright (C) 2017, Leo Ma <begeekmyfriend@gmail.com>
  */
 
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
@@ -14,6 +13,8 @@
 #include <sys/stat.h>
 
 #include "bplustree.h"
+
+
 
 enum {
     INVALID_OFFSET = 0xdeadbeef,
@@ -29,12 +30,10 @@ enum {
     RIGHT_SIBLING = 1,
 };
 
-
-
 #define ADDR_STR_WIDTH 16
 #define offset_ptr(node) ((char *) (node) + sizeof(*node))
 #define key(node) ((uint64_t *)offset_ptr(node))
-#define data(node) ((value_t *)(offset_ptr(node) + _max_entries * sizeof(value_t)))
+#define data(node) ((value_t *)(offset_ptr(node) + _max_entries * sizeof(uint64_t)))
 #define sub(node) ((off_t *)(offset_ptr(node) + (_max_order - 1) * sizeof(uint64_t)))
 
 static int _block_size;
@@ -224,17 +223,12 @@ static inline void sub_node_flush(struct bplus_tree *tree, struct bplus_node *pa
 
 static value_t bplus_tree_search(struct bplus_tree *tree, uint64_t key)
 {
-    value_t *ret;
-    ret = NULL;
+    value_t* ret;
     struct bplus_node *node = node_seek(tree, tree->root);
     while (node != NULL) {
         int i = key_binary_search(node, key);
         if (is_leaf(node)) {
-            if ( i >= 0)
-                ret = &data(node)[i];
-            else
-                ret = NULL;
-//                        ret = i >= 0 ? data(node)[i] : NULL;
+            ret = i >= 0 ? &data(node)[i] : NULL;
             break;
         } else {
             if (i >= 0) {
@@ -245,7 +239,7 @@ static value_t bplus_tree_search(struct bplus_tree *tree, uint64_t key)
             }
         }
     }
-
+    assert(ret != NULL);
     return *ret;
 }
 
@@ -281,8 +275,8 @@ static void right_node_add(struct bplus_tree *tree, struct bplus_node *node, str
     node->next = right->self;
 }
 
-static int non_leaf_insert(struct bplus_tree *tree, struct bplus_node *node,
-                             struct bplus_node *l_ch, struct bplus_node *r_ch, uint64_t key);
+static uint64_t non_leaf_insert(struct bplus_tree *tree, struct bplus_node *node,
+                                struct bplus_node *l_ch, struct bplus_node *r_ch, uint64_t key);
 
 static int parent_node_build(struct bplus_tree *tree, struct bplus_node *l_ch,
                              struct bplus_node *r_ch, uint64_t key)
@@ -312,8 +306,8 @@ static int parent_node_build(struct bplus_tree *tree, struct bplus_node *l_ch,
 }
 
 static uint64_t non_leaf_split_left(struct bplus_tree *tree, struct bplus_node *node,
-                                 struct bplus_node *left, struct bplus_node *l_ch,
-                                 struct bplus_node *r_ch, uint64_t key, int insert)
+                                    struct bplus_node *left, struct bplus_node *l_ch,
+                                    struct bplus_node *r_ch, uint64_t key, int insert)
 {
     int i;
     uint64_t split_key;
@@ -369,8 +363,8 @@ static uint64_t non_leaf_split_left(struct bplus_tree *tree, struct bplus_node *
 }
 
 static uint64_t non_leaf_split_right1(struct bplus_tree *tree, struct bplus_node *node,
-                                   struct bplus_node *right, struct bplus_node *l_ch,
-                                   struct bplus_node *r_ch, uint64_t key, int insert)
+                                      struct bplus_node *right, struct bplus_node *l_ch,
+                                      struct bplus_node *r_ch, uint64_t key, int insert)
 {
     int i;
 
@@ -407,8 +401,8 @@ static uint64_t non_leaf_split_right1(struct bplus_tree *tree, struct bplus_node
 }
 
 static uint64_t non_leaf_split_right2(struct bplus_tree *tree, struct bplus_node *node,
-                                   struct bplus_node *right, struct bplus_node *l_ch,
-                                   struct bplus_node *r_ch, uint64_t key, int insert)
+                                      struct bplus_node *right, struct bplus_node *l_ch,
+                                      struct bplus_node *r_ch, uint64_t key, int insert)
 {
     int i;
 
@@ -463,8 +457,8 @@ static void non_leaf_simple_insert(struct bplus_tree *tree, struct bplus_node *n
     node->children++;
 }
 
-static int non_leaf_insert(struct bplus_tree *tree, struct bplus_node *node,
-                           struct bplus_node *l_ch, struct bplus_node *r_ch, uint64_t key)
+static uint64_t non_leaf_insert(struct bplus_tree *tree, struct bplus_node *node,
+                                struct bplus_node *l_ch, struct bplus_node *r_ch, uint64_t key)
 {
     /* Search key location */
     int insert = key_binary_search(node, key);
@@ -499,7 +493,7 @@ static int non_leaf_insert(struct bplus_tree *tree, struct bplus_node *node,
 }
 
 static uint64_t leaf_split_left(struct bplus_tree *tree, struct bplus_node *leaf,
-                             struct bplus_node *left, uint64_t key, value_t data, int insert)
+                                struct bplus_node *left, uint64_t key, value_t data, int insert)
 {
     /* split = [m/2] */
     int split = (leaf->children + 1) / 2;
@@ -533,7 +527,7 @@ static uint64_t leaf_split_left(struct bplus_tree *tree, struct bplus_node *leaf
 }
 
 static uint64_t leaf_split_right(struct bplus_tree *tree, struct bplus_node *leaf,
-                              struct bplus_node *right, uint64_t key, value_t data, int insert)
+                                 struct bplus_node *right, uint64_t key, value_t data, int insert)
 {
     /* split = [m/2] */
     int split = (leaf->children + 1) / 2;
@@ -614,13 +608,6 @@ static int leaf_insert(struct bplus_tree *tree, struct bplus_node *leaf, uint64_
     return 0;
 }
 
-/**
- * 向B+树中插入结点
- * @param tree
- * @param key 待插入结点对应的 key
- * @param data 待插入的结点
- * @return 0
- */
 static int bplus_tree_insert(struct bplus_tree *tree, uint64_t key, value_t data)
 {
     struct bplus_node *node = node_seek(tree, tree->root);
@@ -986,112 +973,12 @@ value_t bplus_tree_get(struct bplus_tree *tree, uint64_t key)
 
 int bplus_tree_put(struct bplus_tree *tree, uint64_t key, value_t data)
 {
+
     return bplus_tree_insert(tree, key, data);
+
 }
 
 
-int bplus_tree_rem(struct bplus_tree *tree, uint64_t key)
-{
-    return bplus_tree_delete(tree, key);
-}
-
-
-/**
- * Customized API for dedup.c
- */
-value_t bplus_tree_get_fuzzy(struct bplus_tree *tree, uint64_t key)
-{
-    value_t *start = NULL;
-    start = malloc(sizeof(value_t));
-    start->nbd_offset = 0;
-    start->length = 0;
-    // If we can't find a value references to the given key,
-    // we should return a empty value whose fingerprint is zeros.
-    memset(start->fingerprit, 0, sizeof(start->fingerprit));
-
-    uint64_t min = key - MAX_BLOCK_SIZE - 1;
-    if (min < 0)
-        min = 0;
-    uint64_t max = key + MAX_BLOCK_SIZE;
-
-    struct bplus_node *node = node_seek(tree, tree->root);
-    while (node != NULL) {
-        int i = key_binary_search(node, min);
-        if (is_leaf(node)) {
-            if (i < 0) {
-                i = -i - 1;
-                if (i >= node->children) {
-                    node = node_seek(tree, node->next);
-                }
-            }
-            while (node != NULL && key(node)[i] <= max) {
-                *start = data(node)[i];
-
-                if ((key >= start->nbd_offset) && (key < start->length + start->nbd_offset))
-                    return *start;
-
-                if (++i >= node->children) {
-                    node = node_seek(tree, node->next);
-                    i = 0;
-                }
-            }
-            break;
-        } else {
-            if (i >= 0) {
-                node = node_seek(tree, sub(node)[i + 1]);
-            } else  {
-                i = -i - 1;
-                node = node_seek(tree, sub(node)[i]);
-            }
-        }
-    }
-
-    memset(start, 0, sizeof(value_t));
-    return *start;
-}
-
-value_t bplus_tree_get_range(struct bplus_tree *tree, uint64_t key1, uint64_t key2)
-{
-//        long start = -1;
-    value_t *start = NULL;
-    start = malloc(sizeof(value_t));
-    uint64_t min = key1 <= key2 ? key1 : key2;
-    uint64_t max = min == key1 ? key2 : key1;
-
-    struct bplus_node *node = node_seek(tree, tree->root);
-    while (node != NULL) {
-        int i = key_binary_search(node, min);
-        if (is_leaf(node)) {
-            if (i < 0) {
-                i = -i - 1;
-                if (i >= node->children) {
-                    node = node_seek(tree, node->next);
-                }
-            }
-            while (node != NULL && key(node)[i] <= max) {
-                *start = data(node)[i];
-
-//                if (start->start < key1 && start->length + start->start < key1)
-//                    return *start;
-
-                if (++i >= node->children) {
-                    node = node_seek(tree, node->next);
-                    i = 0;
-                }
-            }
-            break;
-        } else {
-            if (i >= 0) {
-                node = node_seek(tree, sub(node)[i + 1]);
-            } else  {
-                i = -i - 1;
-                node = node_seek(tree, sub(node)[i]);
-            }
-        }
-    }
-
-    return *start;
-}
 
 int bplus_open(char *filename)
 {
@@ -1130,7 +1017,6 @@ static inline void hex_to_str(off_t offset, char *buf, int len)
     }
 }
 
-
 static inline off_t offset_load(int fd)
 {
     char buf[ADDR_STR_WIDTH];
@@ -1145,70 +1031,13 @@ static inline ssize_t offset_store(int fd, off_t offset)
     return write(fd, buf, sizeof(buf));
 }
 
-/**
- * 初始化B+树
- * @param filename
- * @param block_size
- * @return
- */
-struct bplus_tree *bplus_tree_init_debug(int fd, int block_size)
-{
-    int i;
-    struct bplus_node node;
-
-    _block_size = block_size;
-    _max_order = (block_size - sizeof(node)) / (sizeof(uint64_t) + sizeof(off_t));
-    _max_entries = (block_size - sizeof(node)) / (sizeof(uint64_t) + sizeof(value_t));
-    if (_max_order <= 2) {
-        fprintf(stderr, "block size is too small for one node!\n");
-        return NULL;
-    }
-
-    struct bplus_tree *tree = calloc(1, sizeof(*tree));
-    assert(tree != NULL);
-    list_init(&tree->free_blocks);
-//    strcpy(tree->filename, filename);
-
-    /* load index boot file */
-//    int fd = open(strcat(tree->filename, ".boot"), O_RDWR, 0644);
-    if (fd >= 0) {
-        tree->root = offset_load(fd);
-        _block_size = offset_load(fd);
-        tree->file_size = offset_load(fd);
-        /* load free blocks */
-        while ((i = offset_load(fd)) != INVALID_OFFSET) {
-            struct free_block *block = malloc(sizeof(*block));
-            assert(block != NULL);
-            block->offset = i;
-            list_add(&block->link, &tree->free_blocks);
-        }
-        close(fd);
-    } else {
-        tree->root = INVALID_OFFSET;
-        _block_size = block_size;
-        tree->file_size = 0;
-    }
-
-    /* set order and entries */
-    _max_order = (_block_size - sizeof(node)) / (sizeof(uint64_t) + sizeof(off_t));
-    _max_entries = (_block_size - sizeof(node)) / (sizeof(uint64_t) + sizeof(value_t));
-    printf("config node order:%d and leaf entries:%d\n", _max_order, _max_entries);
-
-    /* init free node caches */
-    tree->caches = malloc(_block_size * MIN_CACHE_NUM);
-
-    /* open data file */
-//    tree->fd = bplus_open(filename);
-    assert(tree->fd >= 0);
-    return tree;
-}
 struct bplus_tree *bplus_tree_init(char *filename, int block_size)
 {
     int i;
     struct bplus_node node;
 
     if (strlen(filename) >= 1024) {
-        fprintf(stderr, "Index file name too long!\n");
+        fprintf(stderr, "Index file name too value_t!\n");
         return NULL;
     }
 
@@ -1272,7 +1101,6 @@ struct bplus_tree *bplus_tree_init(char *filename, int block_size)
 void bplus_tree_deinit(struct bplus_tree *tree)
 {
     int fd = open(tree->filename, O_CREAT | O_RDWR, 0644);
-//    int fd = tree->fd;
     assert(fd >= 0);
     assert(offset_store(fd, tree->root) == ADDR_STR_WIDTH);
     assert(offset_store(fd, _block_size) == ADDR_STR_WIDTH);
@@ -1292,100 +1120,158 @@ void bplus_tree_deinit(struct bplus_tree *tree)
     free(tree);
 }
 
-//#ifdef _BPLUS_TREE_DEBUG
+
 
 #define MAX_LEVEL 10
 
 struct node_backlog {
-        /* Node backlogged */
-        off_t offset;
-        /* The index next to the backtrack point, must be >= 1 */
-        int next_sub_idx;
+    /* Node backlogged */
+    off_t offset;
+    /* The index next to the backtrack point, must be >= 1 */
+    int next_sub_idx;
 };
 
 static inline int children(struct bplus_node *node)
 {
-        assert(!is_leaf(node));
-        return node->children;
+    assert(!is_leaf(node));
+    return node->children;
 }
 
 static void node_key_dump(struct bplus_node *node)
 {
-        int i;
-        if (is_leaf(node)) {
-                printf("leaf:");
-                for (i = 0; i < node->children; i++) {
-                        printf(" %d", key(node)[i]);
-                }
-        } else {
-                printf("node:");
-                for (i = 0; i < node->children - 1; i++) {
-                        printf(" %d", key(node)[i]);
-                }
+    int i;
+    if (is_leaf(node)) {
+        printf("leaf:\n");
+        for (i = 0; i < node->children; i++) {
+            printf("key: %lu, nbd_off: %lu, len: %lu, fp:%s\n",
+                   key(node)[i], data(node)[i].nbd_offset, data(node)[i].length, data(node)[i].fingerprit);
         }
-        printf("\n");
+    } else {
+        printf("node:");
+        for (i = 0; i < node->children - 1; i++) {
+            printf(" %lu", key(node)[i]);
+        }
+    }
+    printf("\n");
 }
 
 static void draw(struct bplus_tree *tree, struct bplus_node *node, struct node_backlog *stack, int level)
 {
-        int i;
-        for (i = 1; i < level; i++) {
-                if (i == level - 1) {
-                        printf("%-8s", "+-------");
-                } else {
-                        if (stack[i - 1].offset != INVALID_OFFSET) {
-                                printf("%-8s", "|");
-                        } else {
-                                printf("%-8s", " ");
-                        }
-                }
+    int i;
+    for (i = 1; i < level; i++) {
+        if (i == level - 1) {
+            printf("%-8s", "+-------");
+        } else {
+            if (stack[i - 1].offset != INVALID_OFFSET) {
+                printf("%-8s", "|");
+            } else {
+                printf("%-8s", " ");
+            }
         }
-        node_key_dump(node);
+    }
+    node_key_dump(node);
 }
 
 void bplus_tree_dump(struct bplus_tree *tree)
 {
-        int level = 0;
-        struct bplus_node *node = node_seek(tree, tree->root);
-        struct node_backlog *p_nbl = NULL;
-        struct node_backlog nbl_stack[MAX_LEVEL];
-        struct node_backlog *top = nbl_stack;
+    int level = 0;
+    struct bplus_node *node = node_seek(tree, tree->root);
+    struct node_backlog *p_nbl = NULL;
+    struct node_backlog nbl_stack[MAX_LEVEL];
+    struct node_backlog *top = nbl_stack;
 
-        for (; ;) {
-                if (node != NULL) {
-                        /* non-zero needs backward and zero does not */
-                        int sub_idx = p_nbl != NULL ? p_nbl->next_sub_idx : 0;
-                        /* Reset each loop */
-                        p_nbl = NULL;
+    for (; ;) {
+        if (node != NULL) {
+            /* non-zero needs backward and zero does not */
+            int sub_idx = p_nbl != NULL ? p_nbl->next_sub_idx : 0;
+            /* Reset each loop */
+            p_nbl = NULL;
 
-                        /* Backlog the node */
-                        if (is_leaf(node) || sub_idx + 1 >= children(node)) {
-                                top->offset = INVALID_OFFSET;
-                                top->next_sub_idx = 0;
-                        } else {
-                                top->offset = node->self;
-                                top->next_sub_idx = sub_idx + 1;
-                        }
-                        top++;
-                        level++;
+            /* Backlog the node */
+            if (is_leaf(node) || sub_idx + 1 >= children(node)) {
+                top->offset = INVALID_OFFSET;
+                top->next_sub_idx = 0;
+            } else {
+                top->offset = node->self;
+                top->next_sub_idx = sub_idx + 1;
+            }
+            top++;
+            level++;
 
-                        /* Draw the node when first passed through */
-                        if (sub_idx == 0) {
-                                draw(tree, node, nbl_stack, level);
-                        }
+            /* Draw the node when first passed through */
+            if (sub_idx == 0) {
+                draw(tree, node, nbl_stack, level);
+            }
 
-                        /* Move deep down */
-                        node = is_leaf(node) ? NULL : node_seek(tree, sub(node)[sub_idx]);
-                } else {
-                        p_nbl = top == nbl_stack ? NULL : --top;
-                        if (p_nbl == NULL) {
-                                /* End of traversal */
-                                break;
-                        }
-                        node = node_seek(tree, p_nbl->offset);
-                        level--;
-                }
+            /* Move deep down */
+            node = is_leaf(node) ? NULL : node_seek(tree, sub(node)[sub_idx]);
+        } else {
+            p_nbl = top == nbl_stack ? NULL : --top;
+            if (p_nbl == NULL) {
+                /* End of traversal */
+                break;
+            }
+            node = node_seek(tree, p_nbl->offset);
+            level--;
         }
+    }
 }
 
-//#endif
+
+
+
+/**
+ * Customized API for dedup.c
+ */
+value_t bplus_tree_get_fuzzy(struct bplus_tree *tree, uint64_t key)
+{
+    value_t *start = NULL;
+    start = malloc(sizeof(value_t));
+
+
+    uint64_t min;
+    if (key < MAX_BLOCK_SIZE -1) {
+        min = 0;
+    } else {
+        min = key - MAX_BLOCK_SIZE - 1;
+    }
+    uint64_t max = key + MAX_BLOCK_SIZE;
+
+    struct bplus_node *node = node_seek(tree, tree->root);
+    while (node != NULL) {
+        int i = key_binary_search(node, min);
+        if (is_leaf(node)) {
+            if (i < 0) {
+                i = -i - 1;
+                if (i >= node->children) {
+                    node = node_seek(tree, node->next);
+                }
+            }
+            while (node != NULL && key(node)[i] <= max) {
+                *start = data(node)[i];
+
+                if ((key >= start->nbd_offset) && (key < start->length + start->nbd_offset))
+                    return *start;
+
+                if (++i >= node->children) {
+                    node = node_seek(tree, node->next);
+                    i = 0;
+                }
+            }
+            break;
+        } else {
+            if (i >= 0) {
+                node = node_seek(tree, sub(node)[i + 1]);
+            } else  {
+                i = -i - 1;
+                node = node_seek(tree, sub(node)[i]);
+            }
+        }
+    }
+
+    // If we can't find a value references to the given key,
+    // we should return a empty value whose fingerprint is zeros.
+    memset(start, 0, sizeof(value_t));
+    return *start;
+}
+

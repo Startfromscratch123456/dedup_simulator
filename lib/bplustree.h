@@ -5,7 +5,12 @@
 #ifndef _BPLUS_TREE_H
 #define _BPLUS_TREE_H
 
+#include <stdio.h>
+#include <stdint.h>
 #include "dedup.h"
+
+
+typedef struct block_map_entry value_t;
 
 /* 5 node caches are needed at least for self, left and right sibling, sibling
  * of sibling, parent and node seeking */
@@ -17,19 +22,11 @@
 #define list_first_entry(ptr, type, member) \
 	list_entry((ptr)->next, type, member)
 
-#define list_last_entry(ptr, type, member) \
-	list_entry((ptr)->prev, type, member)
-
-#define list_for_each(pos, head) \
-        for (pos = (head)->next; pos != (head); pos = pos->next)
-
 #define list_for_each_safe(pos, n, head) \
         for (pos = (head)->next, n = pos->next; pos != (head); \
                 pos = n, n = pos->next)
 
 
-
-typedef struct block_map_entry value_t;
 
 struct list_head {
     struct list_head *prev, *next;
@@ -88,29 +85,6 @@ typedef struct bplus_node {
     int children;
 } bplus_node;
 
-/*
-struct bplus_non_leaf {
-        off_t self;
-        off_t parent;
-        off_t prev;
-        off_t next;
-        int type;
-        int children;
-        uint64_t key[BPLUS_MAX_ORDER - 1];
-        off_t sub_ptr[BPLUS_MAX_ORDER];
-};
-
-struct bplus_leaf {
-        off_t self;
-        off_t parent;
-        off_t prev;
-        off_t next;
-        int type;
-        int entries;
-        uint64_t key[BPLUS_MAX_ENTRIES];
-        long data[BPLUS_MAX_ENTRIES];
-};
-*/
 
 typedef struct free_block {
     struct list_head link;
@@ -136,7 +110,6 @@ struct bplus_tree *bplus_tree_init(char *filename, int block_size);
 void bplus_tree_deinit(struct bplus_tree *tree);
 int bplus_open(char *filename);
 void bplus_close(int fd);
-int bplus_tree_rem(struct bplus_tree *tree, uint64_t key);
 value_t bplus_tree_get_fuzzy(struct bplus_tree *tree, uint64_t key);
 
 #endif  /* _BPLUS_TREE_H */
