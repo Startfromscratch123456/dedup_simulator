@@ -707,6 +707,16 @@ void static open_hash_file(char *filename)
     assert(g_args.hash_fd != -1);
 }
 
+void set_default_options()
+{
+    g_args.log_on = false;  // don't log for now
+    g_args.hash_filename = "./hash.db";
+    g_args.bplustree_filename = "./bptree.db";
+    g_args.dataset_filename = "/home/cyril/dataset/kernel/fslhomes-kernel";
+    g_args.RW = READ_MODE;
+    g_args.MAP = BPTREE_MODE;
+    g_args.run_mode = RUN_MODE;
+}
 
 void parse_command_line(int argc, char *argv[])
 {
@@ -724,13 +734,7 @@ void parse_command_line(int argc, char *argv[])
             {NULL, 0, NULL, NULL},
     };
 
-    // default opts
-    g_args.hash_filename = "./hash.db";
-    g_args.bplustree_filename = "./bptree.db";
-    g_args.dataset_filename = "/home/cyril/dataset/kernel/fslhomes-kernel";
-    g_args.RW = READ_MODE;
-    g_args.MAP = BPTREE_MODE;
-    g_args.run_mode = RUN_MODE;
+    set_default_options();
 
     int opt = getopt_long(argc, argv, opt_string, long_opts, NULL);
     while( opt != -1 ) {
@@ -784,8 +788,6 @@ int main(int argc, char *argv[])
         g_args.tree = bplus_tree_init(g_args.bplustree_filename, 4096);
     open_hash_file(g_args.hash_filename);       // open hash table's db file
 
-    /// settings
-    g_args.log_on = false;  // don't log for now
 
     ////////////////////////////////////////////////
     ////////////         INIT MODE        //////////
