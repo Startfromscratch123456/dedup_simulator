@@ -773,10 +773,29 @@ void parse_command_line(int argc, char *argv[])
     }
 }
 
+void print_statistic_info()
+{
+    if (g_args.RW == WRITE_MODE) {
+        printf("\n\n===================== SIZE ======================\n");
+        printf("B+Tree(/Space) size: %.3f M.\n", g_args.n_bpt_node * sizeof(struct block_map_entry)/1024.0f/1024.0f);
+        printf("Hash Index size: %.3f M.\n", g_args.n_hash_index* sizeof(struct hash_index_entry)/1024.0f/1024.0f);
+        printf("Hash Log size: %.3f M.\n", g_args.n_hash_log* sizeof(struct hash_log_entry)/1024.0f/1024.0f);
+        printf("\n===================== TIME ======================\n");
+        if (g_args.MAP == SPACE_MODE) {
+            printf("Write Space: %.3f s.\n", (float)timer_write_space/CLOCKS_PER_SEC);
 
-/**
- * Main entry
- */
+        } else {
+            printf("Write Tree: %.3f s.\n", (float)timer_write_tree/CLOCKS_PER_SEC);
+        }
+    } else {
+        printf("\n===================== TIME ======================\n");
+        if (g_args.MAP == BPTREE_MODE)
+            printf("Read Tree: %.3f s.\n", (float)timer_read_tree/CLOCKS_PER_SEC);
+        else
+            printf("Read Space: %.3f s.\n", (float)timer_read_space/CLOCKS_PER_SEC);
+    }
+}
+
 int main(int argc, char *argv[])
 {
     ssize_t err;
@@ -845,25 +864,8 @@ int main(int argc, char *argv[])
 
         read_datafile(g_args.dataset_filename);
 
-        if (g_args.RW == WRITE_MODE) {
-            printf("\n\n===================== SIZE ======================\n");
-            printf("B+Tree(/Space) size: %.3f M.\n", g_args.n_bpt_node * sizeof(struct block_map_entry)/1024.0f/1024.0f);
-            printf("Hash Index size: %.3f M.\n", g_args.n_hash_index* sizeof(struct hash_index_entry)/1024.0f/1024.0f);
-            printf("Hash Log size: %.3f M.\n", g_args.n_hash_log* sizeof(struct hash_log_entry)/1024.0f/1024.0f);
-            printf("\n===================== TIME ======================\n");
-            if (g_args.MAP == SPACE_MODE) {
-                printf("Write Space: %.3f s.\n", (float)timer_write_space/CLOCKS_PER_SEC);
+        print_statistic_info();
 
-            } else {
-                printf("Write Tree: %.3f s.\n", (float)timer_write_tree/CLOCKS_PER_SEC);
-            }
-        } else {
-            printf("\n===================== TIME ======================\n");
-            if (g_args.MAP == BPTREE_MODE)
-                printf("Read Tree: %.3f s.\n", (float)timer_read_tree/CLOCKS_PER_SEC);
-            else
-                printf("Read Space: %.3f s.\n", (float)timer_read_space/CLOCKS_PER_SEC);
-        }
 
 
 
