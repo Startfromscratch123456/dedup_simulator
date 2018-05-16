@@ -3,9 +3,9 @@
 
 #include <stdint.h>
 
-#define MIN_BLOCK_SIZE (2 * 1024)
-#define MAX_BLOCK_SIZE (8 * 1024)
-#define SIZE ( 20ull * 1024ull * 1024ull * 1024ull)
+#define MIN_BLOCK_SIZE (16)
+#define MAX_BLOCK_SIZE (32 * 1024)
+#define SIZE ( 40ull * 1024ull * 1024ull * 1024ull)
 #define HASH_LOG_BLOCK_SIZE ( 4 * 1024 )
 #define VIR_BLOCK_SIZE MAX_BLOCK_SIZE
 #define FINGERPRINT_SIZE 20
@@ -71,9 +71,7 @@ typedef struct file_info_t {
     uint64_t chunks_n;
 }file_info;
 
-/* Forward declaration */
-static int read_one_block(void *buf, uint32_t len, uint64_t offset);
-static int write_cdc_block(void *buf, uint32_t len, uint64_t offset);
+
 
 
 
