@@ -233,7 +233,8 @@ static int hash_space_insert(uint64_t offset, struct block_map_entry ble)
     for (int i = 0; i < ENTRIES_PER_SPACE; i ++) {
         if (space[i].length == 0) {
             /// We have found an empty slot.
-            memcpy(space + i, &block_map_entry, sizeof(struct block_map_entry));
+            space[i] = ble;
+//            memcpy(space + i, &block_map_entry, sizeof(struct block_map_entry));
             hash_put_space(offset, &space);
             return 0;
         }
@@ -246,10 +247,6 @@ static int hash_space_insert(uint64_t offset, struct block_map_entry ble)
 
 
 
-
-/**
- * Search the hash log address of given hash
- */
 static uint64_t hash_index_lookup(char *hash)
 {
     hash_bucket bucket;
@@ -452,6 +449,7 @@ static int read_one_chunk_by_off(uint64_t offset, void* buf)
     printf("[READ] | nbd offset: %lu\n", offset);
     struct block_map_entry ble;
     char log_line[MAXLINE];
+    int i;
 
     if (g_args.MAP == BPTREE_MODE) {
         clock_t read_tree_start = clock();
@@ -465,11 +463,14 @@ static int read_one_chunk_by_off(uint64_t offset, void* buf)
         clock_t read_space_start = clock();
         hash_space space;
         hash_get_space(offset, &space);
-        for (int i = 0; i < ENTRIES_PER_SPACE; i ++) {
-            if (space[i].nbd_offset < offset && space[i].nbd_offset + space[i].length > offset) {
+        for (i = 0; i < ENTRIES_PER_SPACE; i ++) {
+            if (space[i].nbd_offset <= offset && space[i].nbd_offset + space[i].length > offset) {
                 ble = space[i];
+                break;
             }
         }
+        assert(i != ENTRIES_PER_SPACE);
+
         timer_read_space += clock() - read_space_start;
     }
     read_one_chunk((uint8_t *)ble.fingerprit);
@@ -637,8 +638,8 @@ static int read_datafile(char *datafile_name)
             } else if (g_args.RW == READ_MODE) {
                 read_one_chunk_by_off(get_nbd_offset(ci->size), NULL);
             }
-            if (n_chunks >= 50)
-                return 0;
+//            if (n_chunks >= 50)
+//                return 0;
         }
     }
 
@@ -706,7 +707,8 @@ void set_default_options()
     g_args.bplustree_filename = "./bptree.db";
     g_args.dataset_filename = "/home/cyril/dataset/kernel/fslhomes-kernel";
     g_args.RW = READ_MODE;
-    g_args.MAP = BPTREE_MODE;
+//    g_args.MAP = BPTREE_MODE;
+    g_args.MAP = SPACE_MODE;
     g_args.run_mode = RUN_MODE;
 }
 
