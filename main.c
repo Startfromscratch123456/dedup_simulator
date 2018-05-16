@@ -37,9 +37,6 @@
 // ===================================================
 
 struct g_args_t {
-    uint64_t n_hash_index;
-    uint64_t n_hash_log;
-    uint64_t n_bpt_node;
     int image_fd;
     int RW;
     int MAP;
@@ -57,6 +54,28 @@ struct g_args_t {
 };
 struct g_args_t g_args;
 
+struct evaluation_indicators_s {
+    // write
+    clock_t timer_write_space;
+    clock_t timer_write_tree;
+    uint64_t n_chunk_sum;
+    uint64_t n_chunk_redundant;
+    uint64_t len_data_sum;
+    uint64_t len_data_redundant;
+    uint64_t n_block_map_entry;
+    uint64_t n_hash_log_entry;
+    uint64_t n_bucket;
+    uint64_t n_space;
+
+    // read & search
+    clock_t timer_read_space;
+    clock_t timer_read_tree;
+    clock_t timer_read_hash_index;
+    clock_t timer_read_hash_log;
+
+};
+struct evaluation_indicators_s indicators;
+
 static void *zeros;
 static struct hash_log_entry *cache;
 static uint64_t hash_log_free_list;
@@ -72,10 +91,7 @@ enum mode{
 
 };
 
-clock_t timer_write_space = 0;
-clock_t timer_write_tree = 0;
-clock_t timer_read_space = 0;
-clock_t timer_read_tree = 0;
+
 
 // ===================================================
 //               Tool Functions: Seek
@@ -163,6 +179,11 @@ static int hash_index_get_bucket(char *hash, hash_bucket *bucket)
     /* We don't need to look at the entire hash, just the last few bytes. */
     int32_t *hash_tail = (int32_t *)(hash + g_args.fingerprint_size - sizeof(int32_t));
     uint64_t bucket_index = *hash_tail % NBUCKETS;
+    
+    if (bucket_index > indicators.n_bucket) {
+        indicators.n_bucket = bucket_index + 1;
+    }
+    
     SEEK_TO_BUCKET(g_args.hash_fd, bucket_index);
     ssize_t err = read(g_args.hash_fd, bucket, sizeof(struct hash_index_entry) * ENTRIES_PER_BUCKET);
     assert(err == sizeof(struct hash_index_entry) * ENTRIES_PER_BUCKET);
@@ -206,6 +227,11 @@ static int hash_index_insert(char *hash, uint64_t hash_log_address)
 static int hash_get_space(uint64_t offset, hash_space *space)
 {
     uint64_t space_n = offset / SPACE_LENGTH;
+
+    if (space_n > indicators.n_space) {
+        indicators.n_space = space_n + 1;
+    }
+
     SEEK_TO_SPACE(g_args.hash_fd, space_n);
     ssize_t err = read(g_args.hash_fd, space, sizeof(struct block_map_entry) * ENTRIES_PER_SPACE);
     assert(err == sizeof(struct block_map_entry) * ENTRIES_PER_SPACE);
@@ -454,11 +480,7 @@ static int read_one_chunk_by_off(uint64_t offset, void* buf)
     if (g_args.MAP == BPTREE_MODE) {
         clock_t read_tree_start = clock();
         ble = bplus_tree_get_fuzzy(g_args.tree, offset);
-//        assert(ble.length != 0);
-        printf("[TREE] | off: %lu, len: %lu fingerprint: ", ble.nbd_offset, ble.length);
-        print_chunk_hash((uint8_t *)ble.fingerprit, g_args.fingerprint_size);
-        PRINTLN;
-        timer_read_tree += clock() - read_tree_start;
+        indicators.timer_read_tree += clock() - read_tree_start;
     } else {
         clock_t read_space_start = clock();
         hash_space space;
@@ -471,7 +493,7 @@ static int read_one_chunk_by_off(uint64_t offset, void* buf)
         }
         assert(i != ENTRIES_PER_SPACE);
 
-        timer_read_space += clock() - read_space_start;
+        indicators.timer_read_space += clock() - read_space_start;
     }
     read_one_chunk((uint8_t *)ble.fingerprit);
 }
@@ -490,23 +512,26 @@ static int write_one_chunk(uint64_t offset, uint64_t chunk_size, uint8_t *hash)
     ssize_t ret;
     char log_line[MAXLINE];
     struct block_map_entry bme;
+    
+    indicators.n_chunk_sum ++;
+    indicators.len_data_sum += chunk_size;
 
     bme.nbd_offset = offset;
     bme.length = chunk_size;
     memcpy(bme.fingerprit, hash, g_args.fingerprint_size);
-    g_args.n_bpt_node ++;
+    indicators.n_block_map_entry ++;
 
     if (g_args.MAP == BPTREE_MODE) {
         w_tree_start = clock();
         bplus_tree_put(g_args.tree, offset, bme);
         w_tree_end = clock();
-        timer_write_tree += w_tree_end - w_tree_start;
+        indicators.timer_write_tree += w_tree_end - w_tree_start;
     }
     else if (g_args.MAP == SPACE_MODE) {
         w_space_start = clock();
         hash_space_insert(offset, bme);
         w_space_end = clock();
-        timer_write_space += w_space_end - w_space_start;
+        indicators.timer_write_space += w_space_end - w_space_start;
     }
 
 
@@ -517,9 +542,7 @@ static int write_one_chunk(uint64_t offset, uint64_t chunk_size, uint8_t *hash)
     hash_log_address = hash_index_lookup((char*)hash);
     if (hash_log_address == (uint64_t)-1) {
         // This chunk is new
-
-        g_args.n_hash_log ++;
-        g_args.n_hash_index ++;
+        indicators.n_hash_log_entry ++;
 
         memcpy(hle.fingerprint, hash, g_args.fingerprint_size);
         hle.data_log_offset = physical_block_new(chunk_size);
@@ -547,6 +570,8 @@ static int write_one_chunk(uint64_t offset, uint64_t chunk_size, uint8_t *hash)
 
     } else {
         // This chunk has already been stored.
+        indicators.n_chunk_redundant ++;
+        indicators.len_data_redundant ++;
         SEEK_TO_HASH_LOG(g_args.hash_fd, hash_log_address);
         ret = read(g_args.hash_fd, &hle, sizeof(struct hash_log_entry));
         assert(ret == sizeof(struct hash_log_entry));
@@ -771,25 +796,38 @@ void print_statistic_info()
 {
     // write mode
     if (g_args.RW == WRITE_MODE) {
-        printf("\n\n===================== SIZE ======================\n");
-        printf("B+Tree(/Space) size: %.3f M.\n", g_args.n_bpt_node * sizeof(struct block_map_entry)/1024.0f/1024.0f);
-        printf("Hash Index size: %.3f M.\n", g_args.n_hash_index* sizeof(struct hash_index_entry)/1024.0f/1024.0f);
-        printf("Hash Log size: %.3f M.\n", g_args.n_hash_log* sizeof(struct hash_log_entry)/1024.0f/1024.0f);
+        printf("\n======================= DATA ======================\n");
+        printf("Redundant chunks: %lu\n", indicators.n_chunk_redundant);
+        printf("Sum chunks: %lu\n", indicators.n_chunk_sum);
+        printf("Redundant len: %lu\n", indicators.len_data_redundant);
+        printf("Sum len: %lu\n", indicators.len_data_sum);
+
+        printf("\n===================== SIZE ======================\n");
+        if (g_args.MAP == BPTREE_MODE)
+            printf("Check db file!\n");
+        else
+            printf("Hash Space size: %.3f M.\n",
+                   indicators.n_space * ENTRIES_PER_SPACE * sizeof(struct block_map_entry) / 1024.0f / 1024.0f);
+        printf("Hash Index size: %.3f M.\n",
+               indicators.n_bucket * ENTRIES_PER_BUCKET * sizeof(struct hash_index_entry)/1024.0f/1024.0f);
+        printf("Hash Log size: %.3f M.\n", indicators.timer_read_hash_log * sizeof(struct hash_log_entry)/1024.0f/1024.0f);
         printf("\n===================== TIME-W ======================\n");
         if (g_args.MAP == SPACE_MODE) {
-            printf("Write Space: %.3f s.\n", (float)timer_write_space/CLOCKS_PER_SEC);
+            printf("Write Space: %.3f s.\n", (float)indicators.timer_write_space/CLOCKS_PER_SEC);
 
         } else {
-            printf("Write Tree: %.3f s.\n", (float)timer_write_tree/CLOCKS_PER_SEC);
+            printf("Write Tree: %.3f s.\n", (float)indicators.timer_write_tree/CLOCKS_PER_SEC);
         }
     }
     // read mode
     else {
         printf("\n===================== TIME-R ======================\n");
         if (g_args.MAP == BPTREE_MODE)
-            printf("Read Tree: %.3f s.\n", (float)timer_read_tree/CLOCKS_PER_SEC);
+            printf("Read Tree: %.3f s.\n", (float)indicators.timer_read_tree/CLOCKS_PER_SEC);
         else
-            printf("Read Space: %.3f s.\n", (float)timer_read_space/CLOCKS_PER_SEC);
+            printf("Read Space: %.3f s.\n", (float)indicators.timer_read_space/CLOCKS_PER_SEC);
+        printf("Read Hash Index: %.3f s.\n", (float)indicators.timer_read_hash_index/CLOCKS_PER_SEC);
+        printf("Read Hash Log: %.3f s.\n", (float)indicators.timer_read_hash_log/CLOCKS_PER_SEC);
     }
 }
 
@@ -818,9 +856,8 @@ int main(int argc, char *argv[])
         g_args.tree = bplus_tree_init(g_args.bplustree_filename, 4096);
     open_hash_file(g_args.hash_filename);       // open hash table's db file
 
-    g_args.n_bpt_node = 0;
-    g_args.n_hash_index = 0;
-    g_args.n_hash_log = 0;
+    memset(&indicators, 0, sizeof(struct evaluation_indicators_s));
+    
     /* By convention the first entry in the hash log is a pointer to the hash
      * log free list. Likewise for the data log. */
     SEEK_TO_HASH_LOG(g_args.hash_fd, 0);
