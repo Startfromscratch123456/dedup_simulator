@@ -828,7 +828,7 @@ int hashfile_add_file(struct hashfile_handle *handle,
 void hashfile_close(struct hashfile_handle *handle)
 {
     time_t curtime;
-    int ret;
+    ssize_t ret;
 
     if (handle->omode == WRITE) {
 
@@ -862,7 +862,7 @@ void hashfile_close(struct hashfile_handle *handle)
 
 const struct chunk_info *hashfile_next_chunk(struct hashfile_handle *handle)
 {
-    int ret;
+    ssize_t ret;
 
     if (handle->omode != READ) {
         errno = EBADF;
