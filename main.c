@@ -37,6 +37,7 @@
 // ===================================================
 
 struct g_args_t {
+    char *image_filename;
     int image_fd;
     int RW;
     int MAP;
@@ -51,6 +52,7 @@ struct g_args_t {
     zlog_category_t* log_error;
     struct bplus_tree *tree;
     bool log_on;
+    bool log_display;
 };
 struct g_args_t g_args;
 
@@ -68,10 +70,13 @@ struct evaluation_indicators_s {
     uint64_t n_space;
 
     // read & search
+    clock_t timer_read_data;
+    clock_t timer_write_data;
     clock_t timer_read_space;
     clock_t timer_read_tree;
     clock_t timer_read_hash_index;
     clock_t timer_read_hash_log;
+    clock_t timer_find_size_of_space;
 
 };
 struct evaluation_indicators_s indicators;
@@ -80,6 +85,7 @@ static void *zeros;
 static struct hash_log_entry *cache;
 static uint64_t hash_log_free_list;
 static uint64_t data_log_free_offset;
+static char* str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
 enum mode{
     INIT_MODE = 0,
@@ -90,8 +96,6 @@ enum mode{
     SPACE_MODE = 5,
 
 };
-
-
 
 // ===================================================
 //               Tool Functions: Seek
@@ -171,6 +175,13 @@ static void print_chunk_hash(const uint8_t *hash,
         printf(":%.2hhx", hash[j]);
 }
 
+static void gen_data(char* dest, uint64_t len)
+{
+    for (int i=0; i<len; i++) {
+        dest[i] = str[lrand48()%62];
+    }
+}
+
 /**
  * Return the bucket which contains the given fingerprint
  */
@@ -223,6 +234,14 @@ static int hash_index_insert(char *hash, uint64_t hash_log_address)
     assert(0);
 }
 
+
+static int is_space_full(hash_space* space)
+{
+    if (space[ENTRIES_PER_SPACE - 1]->length == 0) {
+        return 1;
+    }
+    return 0;
+}
 
 static int hash_get_space(uint64_t offset, hash_space *space)
 {
@@ -457,17 +476,79 @@ static uint64_t get_nbd_offset(uint64_t chunk_size)
 }
 
 static int read_one_chunk(uint8_t *hash) {
-    /// Since the data set provides fingerprint directly, we don't need search from B+tree or Space
     char log_string[LOG_LINE];
+    char* buf;
+    ssize_t err;
+    clock_t start;
     struct hash_log_entry hle = lookup_fingerprint((char*)hash);
+
     sprintf(log_string, "[READ] | phy addr: %lu, chunk size: %lu, hash: ", hle.data_log_offset, hle.block_size);
-
-
     printf(log_string);
     print_chunk_hash(hash, g_args.fingerprint_size);
     PRINTLN;
 
+    start = clock();
+    lseek(g_args.image_fd, hle.data_log_offset, SEEK_SET);
+    buf = (char*)malloc(hle.block_size);
+    err = read(g_args.image_fd, buf, hle.block_size);
+    assert(err == hle.block_size);
+    indicators.timer_read_data += clock() - start;
+    free(buf);
     return 0;
+}
+
+static int size_of_space(const hash_space spcae)
+{
+    for (int  i = 0; i < ENTRIES_PER_SPACE; i++) {
+        if (spcae[i].length == 0) {
+            return i;
+        }
+    }
+    return ENTRIES_PER_SPACE;
+}
+
+struct block_map_entry insertion_search_space(const hash_space space, uint64_t offset)
+{
+    int min, max, mid;
+    min = 0;
+    max = size_of_space(space) - 1;
+    if (min == 0 && max == 0) {
+        return space[0];
+    }
+    while(min <= max) {
+        mid = min + (offset -space[min].nbd_offset)/(space[max].nbd_offset-space[min].nbd_offset)*(max-min);
+        if (offset > space[mid].nbd_offset) {
+            min = mid + 1;
+        } else if (offset < space[mid].nbd_offset) {
+            max = mid - 1;
+        } else {
+            return space[mid];
+        }
+    }
+    assert(0);
+    return space[mid];
+}
+
+struct block_map_entry binary_search_space(const hash_space space, uint64_t offset) {
+    int min,max,mid;
+    min = 0;
+//    max = ENTRIES_PER_SPACE - 1;
+    max = size_of_space(space) - 1;
+
+    while(min <= max) {
+
+        mid = (min + max) >> 1;
+
+        if (offset > space[mid].nbd_offset) {
+            min = mid + 1;
+        } else if (offset < space[mid].nbd_offset) {
+            max = mid - 1;
+        } else {
+            return space[mid];
+        }
+    }
+    assert(0);
+    return space[mid];
 }
 
 static int read_one_chunk_by_off(uint64_t offset, void* buf)
@@ -485,21 +566,33 @@ static int read_one_chunk_by_off(uint64_t offset, void* buf)
         clock_t read_space_start = clock();
         hash_space space;
         hash_get_space(offset, &space);
-        for (i = 0; i < ENTRIES_PER_SPACE; i ++) {
-            if (space[i].nbd_offset <= offset && space[i].nbd_offset + space[i].length > offset) {
-                ble = space[i];
-                break;
-            }
-        }
-        assert(i != ENTRIES_PER_SPACE);
-
+//        for (i = 0; i < ENTRIES_PER_SPACE; i ++) {
+//            if (space[i].nbd_offset <= offset && space[i].nbd_offset + space[i].length > offset) {
+//                ble = space[i];
+//                break;
+//            }
+//        }
+//        assert(i != ENTRIES_PER_SPACE);
+        ble = binary_search_space(space, offset);
+//        ble = insertion_search_space(space, offset);
         indicators.timer_read_space += clock() - read_space_start;
     }
     read_one_chunk((uint8_t *)ble.fingerprit);
 }
 
-static int write_to_disk(int fd, uint64_t size)
+static int write_to_disk(uint64_t offset, uint64_t size)
 {
+
+    ssize_t err;
+    char *buf = (char*)malloc(size);
+    clock_t start = clock();
+
+    gen_data(buf, size);
+    lseek64(g_args.image_fd, offset, SEEK_SET);
+    err = write(g_args.image_fd, buf, size);
+    assert(err == size);
+    free(buf);
+    indicators.timer_write_data += clock() - start;
     return 0;
 }
 
@@ -566,7 +659,7 @@ static int write_one_chunk(uint64_t offset, uint64_t chunk_size, uint8_t *hash)
         ret = write(g_args.hash_fd, &hle, sizeof(struct hash_log_entry));
         assert(ret == sizeof(struct hash_log_entry));
         // We don't really write data to disk.
-        write_to_disk(0, chunk_size);
+        write_to_disk(hle.data_log_offset, chunk_size);
 
     } else {
         // This chunk has already been stored.
@@ -658,6 +751,9 @@ static int read_datafile(char *datafile_name)
             if (!ci) /* exit the loop if it was the last chunk */
                 break;
             n_chunks ++;
+            if (ci->size < 2*1024 || ci->size > 32*1024) {
+                continue;
+            }
             if (g_args.RW == WRITE_MODE) {
                 write_one_chunk(get_nbd_offset(ci->size), ci->size, ci->hash);
             } else if (g_args.RW == READ_MODE) {
@@ -673,18 +769,27 @@ static int read_datafile(char *datafile_name)
     return 0;
 }
 
-void static open_hash_file(char *filename)
+void static open_file(void)
 {
-    g_args.hash_fd = open64(filename, O_CREAT|O_RDWR|O_LARGEFILE, 0755);
+    g_args.hash_fd = open64(g_args.hash_filename, O_CREAT|O_RDWR|O_LARGEFILE, 0755);
     assert(g_args.hash_fd != -1);
+    g_args.image_fd = open64(g_args.image_filename, O_CREAT|O_RDWR|O_LARGEFILE, 0755);
+    assert(g_args.image_fd != -1);
 }
 
-static int init()
+static int init(void)
 {
     uint64_t i;
     ssize_t err;
 
     /// delete old db file
+    if (access(g_args.image_filename, F_OK) != -1) {
+        if (remove(g_args.image_filename) == 0) {
+            printf("Removed existed file %s\n", g_args.image_filename);
+        } else {
+            perror("Remove image file");
+        }
+    }
     if (access(g_args.bplustree_filename, F_OK) != -1) {
         if (remove(g_args.bplustree_filename) == 0) {
             printf("Removed existed file %s\n", g_args.bplustree_filename);
@@ -705,11 +810,11 @@ static int init()
         if (remove(g_args.hash_filename) == 0) {
             printf("Removed existed file %s\n", g_args.hash_filename);
         } else {
-            perror("Remove B+Tree db file");
+            perror("Remove hash db file");
         }
     }
     printf("Preparing for new db file!\n");
-    open_hash_file(g_args.hash_filename);
+    open_file();
 
     /// no matter in space mode or b+tree mode, we only need to init HASH_LOG area.
     /// HASH_INDEX and SPACE area will be a blank hole
@@ -727,10 +832,12 @@ static int init()
 
 void set_default_options()
 {
+    g_args.log_display = true;
     g_args.log_on = false;  // don't log for now
     g_args.hash_filename = "./hash.db";
     g_args.bplustree_filename = "./bptree.db";
     g_args.dataset_filename = "/home/cyril/dataset/kernel/fslhomes-kernel";
+    g_args.image_filename = "./image";
     g_args.RW = READ_MODE;
 //    g_args.MAP = BPTREE_MODE;
     g_args.MAP = SPACE_MODE;
@@ -810,7 +917,7 @@ void print_statistic_info()
                    indicators.n_space * ENTRIES_PER_SPACE * sizeof(struct block_map_entry) / 1024.0f / 1024.0f);
         printf("Hash Index size: %.3f M.\n",
                indicators.n_bucket * ENTRIES_PER_BUCKET * sizeof(struct hash_index_entry)/1024.0f/1024.0f);
-        printf("Hash Log size: %.3f M.\n", indicators.timer_read_hash_log * sizeof(struct hash_log_entry)/1024.0f/1024.0f);
+        printf("Hash Log size: %.3f M.\n", indicators.n_hash_log_entry * sizeof(struct hash_log_entry)/1024.0f/1024.0f);
         printf("\n===================== TIME-W ======================\n");
         if (g_args.MAP == SPACE_MODE) {
             printf("Write Space: %.3f s.\n", (float)indicators.timer_write_space/CLOCKS_PER_SEC);
@@ -818,6 +925,7 @@ void print_statistic_info()
         } else {
             printf("Write Tree: %.3f s.\n", (float)indicators.timer_write_tree/CLOCKS_PER_SEC);
         }
+        printf("Write data: %.3f s.", (float)indicators.timer_write_data/CLOCKS_PER_SEC);
     }
     // read mode
     else {
@@ -828,7 +936,11 @@ void print_statistic_info()
             printf("Read Space: %.3f s.\n", (float)indicators.timer_read_space/CLOCKS_PER_SEC);
         printf("Read Hash Index: %.3f s.\n", (float)indicators.timer_read_hash_index/CLOCKS_PER_SEC);
         printf("Read Hash Log: %.3f s.\n", (float)indicators.timer_read_hash_log/CLOCKS_PER_SEC);
+        printf("Read data: %.3f s.\n", (float)indicators.timer_read_data/CLOCKS_PER_SEC);
     }
+
+    /// temporary debug
+    printf("find size of space: %lu, %.3f s.\n", indicators.timer_find_size_of_space, (float)indicators.timer_find_size_of_space/CLOCKS_PER_SEC);
 }
 
 int main(int argc, char *argv[])
@@ -846,6 +958,7 @@ int main(int argc, char *argv[])
             bplus_tree_deinit(g_args.tree);
         }
         close(g_args.hash_fd);
+        close(g_args.image_fd);
         return 0;
     }
 
@@ -854,7 +967,7 @@ int main(int argc, char *argv[])
 
     if (g_args.MAP == BPTREE_MODE)
         g_args.tree = bplus_tree_init(g_args.bplustree_filename, 4096);
-    open_hash_file(g_args.hash_filename);       // open hash table's db file
+    open_file();
 
     memset(&indicators, 0, sizeof(struct evaluation_indicators_s));
     
@@ -910,6 +1023,7 @@ int main(int argc, char *argv[])
         bplus_tree_deinit(g_args.tree);
     }
     close(g_args.hash_fd);
+    close(g_args.image_fd);
     return 0;
 
 }
