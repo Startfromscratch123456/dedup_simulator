@@ -3,9 +3,9 @@
 
 #include <stdint.h>
 
-#define MIN_BLOCK_SIZE (2 * 1024)
+#define MIN_BLOCK_SIZE (512)
 #define MAX_BLOCK_SIZE (32 * 1024)
-#define SIZE ( 40ull * 1024ull * 1024ull * 1024ull)
+#define SIZE ( 100ull * 1024ull * 1024ull * 1024ull)
 #define HASH_LOG_BLOCK_SIZE ( 4 * 1024 )
 #define VIR_BLOCK_SIZE MAX_BLOCK_SIZE
 #define FINGERPRINT_SIZE 10
@@ -46,11 +46,6 @@ struct hash_index_entry {
     uint64_t hash_log_address;
 };
 
-struct space_index_entry {
-    uint64_t nbd_offset;
-    uint64_t length;
-    uint64_t space_log_addr;
-};
 
 struct hash_log_entry {
     char        fingerprint[FINGERPRINT_SIZE];
